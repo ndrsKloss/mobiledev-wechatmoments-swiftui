@@ -59,8 +59,12 @@ playground.xcworkspace
 # Add this line if you want to avoid checking in source code from the Xcode workspace
 # *.xcworkspace
 .DS_Store
-mb.log
+mb*.log
 mb.pid
 
 # Claude Code (temporary — will be committed once finalized)
 CLAUDE.md
+
+# Per-commit decision notes — personal review material, not repository content.
+# The reasoning that belongs to the repo lives in spec/ and in the commit subjects.
+docs/decisions/
