@@ -61,3 +61,6 @@ playground.xcworkspace
 .DS_Store
 mb.log
 mb.pid
+
+# Claude Code (temporary — will be committed once finalized)
+CLAUDE.md

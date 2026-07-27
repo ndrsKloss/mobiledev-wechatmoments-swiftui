@@ -1,0 +1,290 @@
+# WeChat Moments — Non-Functional Requirements
+
+> **Purpose:** define *how well* the application must behave — concurrency, resilience to bad data, layout adaptivity, and testability — and *how compliance is evaluated*. This document states requirements; it deliberately avoids choosing APIs, libraries, or code patterns where the choice is still open. Those are recorded as **Future Architecture Decisions (FAD)** and resolved in [`architecture-specification.md`](./architecture-specification.md).
+>
+> **Companion documents:** [`functional-specification.md`](./functional-specification.md) (what the app does) and [`architecture-specification.md`](./architecture-specification.md) (how it is structured).
+>
+> **Normative language:** **MUST** = mandatory · **SHOULD** = strongly recommended · **MAY** = optional. Requirement IDs are stable references (`NFR-<AREA>-NNN`).
+>
+> **Scope guard:** this document covers four areas only — Performance & Concurrency, Data Resilience, Layout Adaptivity, and Testability. Localization, theming, accessibility, security, offline support, and analytics are **out of scope** for this exercise; see [`README.md §5`](./README.md) for the reasoning.
+>
+> **⛔** marks a requirement the current code does not satisfy. **⚠️** marks a contentious or blocking open item.
+
+---
+
+## 1. Performance and Concurrency (`NFR-PERF`)
+
+### 1.1 Objective
+
+The feed **MUST** scroll smoothly while dozens of remote images load. The brief calls this out directly: *"Utilise GCD for multi-thread operation."* Today the app does the opposite of this — every image load blocks whichever thread asks for it.
+
+### 1.2 Scope
+
+- **In scope:** thread affinity of network I/O and JSON decoding, the image-loading pipeline, image caching, cancellation, and the thread on which UI state is published.
+- **Out of scope (for now):** the concurrency *mechanism* for images (GCD vs. Combine vs. `async/await`), the cache eviction policy, and image downsampling strategy — all **FAD** (§1.9).
+
+### 1.3 User-visible behaviour
+
+- Scrolling is smooth from the first frame; no cell blocks the list waiting for its images.
+- A cell shows a placeholder immediately and swaps in the real image when it arrives.
+- Scrolling past a cell and back does not re-download its images.
+- The initial loading indicator reflects real in-flight work (`FR-FEED-003`).
+
+### 1.4 Requirements
+
+| ID | Level | Requirement |
+|----|-------|-------------|
+| `NFR-PERF-001` | MUST | Network requests and JSON decoding **MUST NOT** execute on the main thread. |
+| `NFR-PERF-002` | MUST | Image loading **MUST** be asynchronous. A synchronous, blocking image API **MUST NOT** exist in the codebase. ⛔ *Not met — `ImageHelper` exposes a synchronous `getImage(_:forSize:) -> UIImage?` that unconditionally returns `nil`, and its closure overload downloads via `Data(contentsOf:)` on the caller's thread — i.e. the main thread when called from a SwiftUI `.onAppear`.* |
+| `NFR-PERF-003` | MUST | Loaded images **MUST** be cached in memory and served from cache on subsequent requests for the same URL. ⛔ *Not met — no cache exists.* |
+| `NFR-PERF-004` | MUST | All published UI state changes **MUST** be delivered on the main thread. *(Currently satisfied for network results via `.receive(on: RunLoop.main)`; the image path has no such guarantee because it has no thread hop at all.)* |
+| `NFR-PERF-005` | MUST | The image API **MUST** deliver a result on **every** path — success, failure, and invalid URL. ⛔ *Not met — `ImageHelper.getImage(_:forSize:success:)` invokes its callback only on success; a failed download leaves the caller waiting forever.* |
+| `NFR-PERF-006` | SHOULD | An in-flight image request for a cell that has scrolled off screen **SHOULD** be cancellable, and duplicate concurrent requests for the same URL **SHOULD** be coalesced. |
+| `NFR-PERF-007` | SHOULD | Images **SHOULD** be downsampled to their display size before being held in memory. `ImageHelper` already accepts a `forSize:` parameter for this purpose and currently ignores it. |
+| `NFR-PERF-008` | MUST | Pagination (`FR-PAGE-002`) reads from the in-memory list and **MUST** be a synchronous, allocation-cheap operation — appending a page **MUST NOT** hit the network. |
+
+### 1.5 Engineering constraints
+
+- `Data(contentsOf:)` **MUST NOT** be used for remote URLs anywhere in the codebase. It is synchronous, uncancellable, and has no timeout control.
+- Any API that returns an image must either be genuinely asynchronous (callback, publisher, or `async`) or read from a cache that is already populated. A function that starts an async load and immediately returns a local variable is a defect — `TweetView.avatar(_from:)` and `TweetView.fetchImage(_from:)` are both written this way today (`fn-spec §4.4`).
+- Force-unwrapping an image result is forbidden (`NFR-DATA-004`).
+
+### 1.6 The GCD requirement ⚠️
+
+The brief asks for GCD explicitly. The codebase already uses **Combine** for its networking layer, and SwiftUI's own image loading idiom is `async/await`. These are not equivalent, and picking one silently would be a decision made by omission.
+
+| Concern | GCD | Combine | `async/await` |
+|---------|-----|---------|---------------|
+| Matches the brief's literal wording | ✅ | ✗ | ✗ |
+| Matches the existing networking layer | ✗ | ✅ | ✗ |
+| Cancellation (`NFR-PERF-006`) | Manual (`DispatchWorkItem`) | Built in (`AnyCancellable`) | Built in (`Task`) |
+| Coalescing duplicate requests | Manual | Manual | Manual |
+
+`NFR-PERF-002` requires *asynchronous*; it does not mandate a mechanism. The choice is `FAD-PERF-a`. Note that a GCD-based image loader and a Combine-based network layer can coexist without contradiction — the two pipelines are independent — so the decision does not force a rewrite of `Service/`.
+
+### 1.7 Acceptance criteria
+
+- Scrolling the full 15-tweet feed, including the 9-image tweet, produces no visible stutter.
+- With the network artificially slowed, the list still scrolls at full speed; only the images lag.
+- Scrolling to the bottom and back to the top does not re-issue image requests already served (`NFR-PERF-003`).
+- No `Data(contentsOf:)` call remains in the codebase.
+- Killing mountebank mid-scroll does not hang or crash the app; failed images become placeholders (`NFR-PERF-005`, `NFR-DATA-004`).
+
+### 1.8 Testing and validation considerations
+
+- Instruments → Time Profiler with the main thread filtered, while scrolling: no network or decode frames on the main thread.
+- A unit test asserting the image loader invokes its completion on a failure path (`NFR-PERF-005`).
+- A unit test asserting a second request for the same URL is served without a second network call (`NFR-PERF-003`).
+- Manual: Network Link Conditioner on a slow profile.
+
+### 1.9 Unresolved decisions (Future Architecture Decisions)
+
+- **`FAD-PERF-a`:** ⚠️ concurrency mechanism for the image pipeline — GCD, Combine, or structured concurrency (§1.6).
+- **`FAD-PERF-b`:** cache implementation and eviction policy — `NSCache`, `URLCache`, or a hand-rolled store; memory-only vs. disk-backed.
+- **`FAD-PERF-c`:** whether downsampling (`NFR-PERF-007`) uses `ImageIO` thumbnail generation or a simpler `UIGraphicsImageRenderer` redraw. `Extension/UIImage.swift` already has a `resize(_:)` helper that may or may not be the right primitive.
+- **Assumption:** the feed is small enough (22 elements, ≤ 9 images each) that a memory-only cache with no eviction is acceptable for the exercise.
+
+---
+
+## 2. Data Resilience (`NFR-DATA`)
+
+### 2.1 Objective
+
+The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrade element-by-element, never wholesale: one bad tweet costs one tweet, not the feed.
+
+### 2.2 Scope
+
+- **In scope:** decoding tolerance, HTTP status validation, missing-field fallbacks, image-failure fallbacks, error surfacing.
+- **Out of scope (for now):** retry policy, offline caching, and the visual design of the error state — **FAD** (§2.9).
+
+### 2.3 User-visible behaviour
+
+- Malformed feed elements are invisible — no blank cells, no error banners for individual tweets.
+- A tweet missing an avatar shows a placeholder avatar; a tweet missing content shows no text row.
+- A total request failure produces a visible error state, not a blank screen or a spinner that never stops.
+
+### 2.4 Requirements
+
+| ID | Level | Requirement |
+|----|-------|-------------|
+| `NFR-DATA-001` | MUST | The feed **MUST** be decoded **element by element**. A element that fails to decode **MUST** be skipped, leaving the remaining elements intact. ⛔ *Not met — `TweetService` decodes `[Tweet].self` atomically; see the trap described in `fn-spec §3.3`.* |
+| `NFR-DATA-002` | MUST | Every optional field in the data contract **MUST** be modelled as optional in Swift, and every consumer **MUST** handle its absence. |
+| `NFR-DATA-003` | MUST | HTTP responses **MUST** be status-validated before decoding; a non-2xx status **MUST** produce a typed error. ⛔ *Not met — `HttpService.get(url:)` does `.map(\.data)`, discarding the `HTTPURLResponse` entirely, so the catch-all stub's 404 JSON body is handed to the decoder as if it were success data (`FR-API-005`).* |
+| `NFR-DATA-004` | MUST | A failed or missing image **MUST** render the placeholder asset (`Constants.DEFAULT_EMPTY_IMAGE`). Force-unwrapping an image result is **forbidden**. ⛔ *Not met — `HeaderView.setProfileImage(for:)`, `TweetView.avatar(_from:)`, and `TweetView.fetchImage(_from:)` all force-unwrap `image!` inside their callbacks.* |
+| `NFR-DATA-005` | MUST | Errors **MUST** be surfaced to the view model as typed values that the view can render (`FR-FEED-004`). ⛔ *Not met — `MomentsViewModel.completionHandler` `print`s the error and discards it.* |
+| `NFR-DATA-006` | SHOULD | Diagnostic logging of dropped elements **SHOULD** be available in DEBUG builds (see `fn-spec §8 Q5`). |
+| `NFR-DATA-007` | MUST | List identity **MUST** be stable and unique. ⛔ *Not met — `MomentView` uses `ForEach(tweets, id: \.self)` and `Tweet`'s `Hashable` conformance is synthesised from its single `content` property, so two tweets with identical (or `nil`) content collide. Expanding the model per `FR-API-003` mitigates this only by accident; an explicit stable identity is required.* |
+
+### 2.5 Engineering constraints
+
+- Per-element decoding is conventionally implemented with a `Decodable` wrapper that attempts the real type inside a `try?` and stores `nil` on failure, applied as `[FailableDecodable<Tweet>]`. The mechanism is not mandated — only the behaviour of `NFR-DATA-001` is.
+- Status validation belongs in `HttpService`, the single `URLSession` boundary (`arch-spec §5`), not duplicated into each feature service.
+- The `URLError` failure type in `BaseService.get(url:)` is too narrow to express "HTTP 404"; widening it is part of satisfying `NFR-DATA-003` (`FAD-DATA-b`).
+
+### 2.6 Relationship to the functional specification
+
+`NFR-DATA-001` is the mechanism behind `FR-API-004`; `NFR-DATA-003` behind `FR-API-005`; `NFR-DATA-004` behind `FR-HEADER-002`. The functional spec states *what the user sees*; this section states *what the code must guarantee*. Neither is redundant — a change to one is a signal to re-check the other.
+
+### 2.7 Acceptance criteria
+
+- The feed renders 15 tweets against the unmodified `imposters.ejs`, with the 5 malformed elements absent and no visual artefact where they were.
+- Pointing the app at the catch-all 404 path produces an error state, not a decode failure and not an empty success.
+- Replacing an image URL with a 404 URL yields the placeholder asset in that slot and leaves the rest of the cell intact.
+- Stopping mountebank before launch produces a visible error state within a reasonable timeout.
+
+### 2.8 Testing and validation considerations
+
+- A unit test decoding the committed `WeChatMomentsTests/Resources/Tweets.json` fixture and asserting the malformed elements are dropped while the well-formed ones survive — the count assertion is the whole point (`NFR-TEST-002`).
+- A unit test asserting a 404 response produces an error rather than a decoded value, using a mocked `BaseService`.
+- A unit test asserting `FR-DATA-001` and `FR-DATA-002`: `sender`-only elements dropped, image-only elements kept.
+
+### 2.9 Unresolved decisions (Future Architecture Decisions)
+
+- **`FAD-DATA-a`:** the per-element decoding mechanism (`NFR-DATA-001`) — failable wrapper, manual `UnkeyedDecodingContainer` iteration, or decoding to `[JSONValue]` first.
+- **`FAD-DATA-b`:** the error type flowing through `BaseService`. `URLError` cannot express an HTTP status; a project error enum is the obvious replacement but changes the protocol signature (`arch-spec §5`).
+- **`FAD-DATA-c`:** the visual treatment of the error state — inline row, full-screen replacement, or a retry banner. Currently unspecified anywhere.
+- **`FAD-DATA-d`:** the stable identity for `Tweet` (`NFR-DATA-007`) — a synthesised `UUID` assigned at decode time, or a composite of sender + content + index. The payload carries no id field.
+- **Assumption:** no retry policy is required for this exercise; a failed request stays failed until the user refreshes.
+
+---
+
+## 3. Layout Adaptivity (`NFR-LAYOUT`)
+
+### 3.1 Objective
+
+The brief requires *"layout on all kinds of iOS device screen and orientation."* The layout **MUST** derive from available space rather than from assumed device dimensions.
+
+### 3.2 Scope
+
+- **In scope:** width-independent layout, orientation changes, the image grid's response to available width, text wrapping and expansion.
+- **Out of scope (for now):** iPad-specific layouts, split view, Stage Manager, and Dynamic Type beyond the `SHOULD` in `NFR-LAYOUT-005`.
+
+### 3.3 User-visible behaviour
+
+- Rotating the device reflows the feed; nothing clips, overlaps, or leaves a gap at the trailing edge.
+- The image grid keeps its cells square and its columns aligned at every width.
+- Long tweet content wraps rather than truncating (`FR-TWEET-003`).
+
+### 3.4 Requirements
+
+| ID | Level | Requirement |
+|----|-------|-------------|
+| `NFR-LAYOUT-001` | MUST | No layout **MUST** depend on a hard-coded screen width or a specific device size. Sizes come from the layout system (`GeometryReader`, `.frame(maxWidth:)`, grid sizing), not from constants. |
+| `NFR-LAYOUT-002` | MUST | Rotation **MUST** reflow the header and the feed without clipping or overlap. ⚠️ *`HeaderView` currently pins its height to a fixed `370` and offsets the avatar/nick by arithmetic against that constant; this survives width changes but is fragile under any height change.* |
+| `NFR-LAYOUT-003` | MUST | The image grid's cell size **MUST** derive from available width (`FR-TWEET-010`), preserving square cells and consistent gutters. ⛔ *Not met — `TweetView` frames cells at `Constants.IMAGE_SIZE * 2` regardless of available width.* |
+| `NFR-LAYOUT-004` | MUST | Text **MUST** wrap to unlimited lines where the design calls for full content, and truncate deliberately (with a stated mode) only where it does not — the header nick truncates by design. |
+| `NFR-LAYOUT-005` | SHOULD | The layout **SHOULD** tolerate Dynamic Type at least through the default accessibility sizes. Deliberately a `SHOULD`: the exercise does not require it, and hard-coded point sizes in `Config/Constant.swift` currently prevent it. |
+| `NFR-LAYOUT-006` | SHOULD | Safe areas **SHOULD** be respected for interactive and textual content. *`MomentView` currently applies a blanket `.ignoresSafeArea()`, which is intentional for the full-bleed header but pushes content under the status bar.* |
+
+### 3.5 Engineering constraints
+
+- Layout constants in `Config/Constant.swift` describe *intrinsic* sizes (an avatar is 40×40 regardless of device). They **MUST NOT** be used to derive container widths.
+- SwiftUI's `LazyVGrid` with adaptive or flexible `GridItem`s satisfies `NFR-LAYOUT-003` without manual arithmetic.
+
+### 3.6 Acceptance criteria
+
+- The feed renders correctly on the smallest and largest current iPhone simulators, portrait and landscape, with no clipping and no horizontal scroll.
+- The 9-image tweet forms a clean 3×3 grid at every tested width.
+- Rotating mid-scroll preserves scroll position approximately and does not corrupt the layout.
+
+### 3.7 Testing and validation considerations
+
+- Manual pass across two simulator sizes × two orientations.
+- SwiftUI previews pinned to several device sizes for `TweetView` and `HeaderView`.
+- A UI test that rotates the device and asserts key elements remain hittable.
+
+### 3.8 Unresolved decisions (Future Architecture Decisions)
+
+- **`FAD-LAYOUT-a`:** whether `HeaderView`'s fixed `370` height becomes proportional (e.g. a fraction of width) or stays fixed with only the overlay positioning made relative.
+- **`FAD-LAYOUT-b`:** whether Dynamic Type is pursued at all for this exercise (`NFR-LAYOUT-005`); doing so implies replacing the point sizes in `Config/Constant.swift` with text styles.
+
+---
+
+## 4. Testability (`NFR-TEST`)
+
+### 4.1 Objective
+
+The brief states *"Unit tests are appreciated"* and *"Functional programming is appreciated."* Both are architecture requirements before they are test requirements: code that cannot be constructed without a network cannot be unit tested.
+
+### 4.2 Scope
+
+- **In scope:** dependency injection seams, offline unit tests, fixture usage, the unit/integration split, purity of transforms.
+- **Out of scope (for now):** coverage targets, snapshot testing, and CI configuration — **FAD** (§4.9).
+
+### 4.3 Requirements
+
+| ID | Level | Requirement |
+|----|-------|-------------|
+| `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. ⛔ *Not met — `TweetService.init()` and `UserService.init()` both construct `HttpService()` internally. The `BaseService` protocol exists and the property is typed against it, but nothing can supply a different implementation, so the seam is decorative.* |
+| `NFR-TEST-002` | MUST | Unit tests **MUST NOT** require a live network or a running mountebank instance. ⛔ *Not met — all three service test classes (`HttpServiceTests`, `TweetServiceTests`, `UserServiceTests`) hit `localhost:2727`, so `xcodebuild test` fails outright without the mock server.* |
+| `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. ⛔ *Not met — the file is bundled into the test target but never read; no `Bundle` lookup exists anywhere in the test target.* |
+| `NFR-TEST-004` | MUST | Tests that genuinely require mountebank **MUST** be identifiable as integration tests — by naming, by target, or by a documented `-only-testing` selector — so that the offline suite can be run alone. |
+| `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). |
+| `NFR-TEST-006` | SHOULD | Data transforms — filtering (`FR-DATA-*`), paging windows, grid-column derivation — **SHOULD** be pure functions over their inputs, so they can be tested without any object graph. This is the concrete form the brief's "functional programming is appreciated" takes. |
+| `NFR-TEST-007` | SHOULD | Mocks **SHOULD** live in a single `Mocks/` folder, guarded by `#if DEBUG`, and be shared between SwiftUI previews and tests. |
+| `NFR-TEST-008` | SHOULD | The scenarios in `fn-spec §7` **SHOULD** each have a corresponding automated test where the scenario is observable without a device. |
+
+### 4.4 Engineering constraints
+
+- Constructor injection with a **default argument** (`init(httpService: BaseService = HttpService())`) satisfies `NFR-TEST-001` with no change to any call site — this is the minimal fix for the current gap.
+- `WeChatMomentsTests/Config/TestDataConfig.swift` already holds inline JSON dictionaries (including one keyed `profile-image`) that are largely unused. Either it becomes the mock's data source or it is deleted; leaving dead fixtures alongside live ones is worse than either.
+- `WeChatMomentsTests/WeChatMomentsTests.swift` and `WeChatMomentsUITests/WeChatMomentsUITests.swift` are unmodified Xcode template stubs with empty test bodies. They assert nothing and **SHOULD** be replaced or removed.
+
+### 4.5 Acceptance criteria
+
+- `xcodebuild test` passes with **mountebank stopped**, excluding any explicitly-marked integration tests.
+- A decoding test reads `Tweets.json` from the test bundle and asserts the displayable-count arithmetic of `fn-spec §3.3`.
+- A view-model test drives initial load → append → append → refresh against a mocked service and asserts window sizes 5 → 10 → 15 → 5.
+- No test contains a `localhost` URL outside the integration set.
+
+### 4.6 Testing and validation considerations
+
+- Run the offline suite with the network disabled entirely, not merely with mountebank stopped — a test that quietly depends on the remote image host will pass locally and fail in CI.
+- The current `test_wrong_url` tests assert against the catch-all 404 stub; once `NFR-DATA-003` lands, they become genuine status-validation tests and should move to the mocked suite.
+
+### 4.7 Unresolved decisions (Future Architecture Decisions)
+
+- **`FAD-TEST-a`:** how integration tests are separated — a fourth target, a naming convention plus a documented `-only-testing` invocation, or a test plan. A test plan is the cleanest but requires a shared scheme, which does not currently exist (`arch-spec §13`).
+- **`FAD-TEST-b`:** whether to adopt Swift Testing (`@Test`/`#expect`) or stay on XCTest. The project is on XCTest; the deployment target (iOS 17.2) permits either.
+- **`FAD-TEST-c`:** the fate of `TestDataConfig.swift` — promote to the canonical mock fixture, or delete in favour of `Tweets.json`.
+
+---
+
+## 5. Acceptance Matrix
+
+Every row must pass before the app is considered complete.
+
+| # | Device | Orientation | Backend state | Must verify |
+|---|--------|-------------|---------------|-------------|
+| 1 | Small iPhone | Portrait | mountebank up | 5 tweets initially; grid square; header complete |
+| 2 | Small iPhone | Landscape | mountebank up | Reflow, no clipping, 3×3 grid intact |
+| 3 | Large iPhone | Portrait | mountebank up | Full pagination cycle 5 → 10 → 15 → refresh → 5 |
+| 4 | Large iPhone | Landscape | mountebank up | As row 2 |
+| 5 | Any | Portrait | mountebank **down** | Visible error state; no hang; no crash |
+| 6 | Any | Portrait | mountebank up, image host unreachable | Placeholders in every image slot; text and layout unaffected |
+| 7 | Any | Rotate mid-scroll | mountebank up | Layout survives; scroll position approximately preserved |
+
+Cross-cutting checks for every row: no main-thread stalls while scrolling; no malformed element visible; no force-unwrap crash; memory does not grow unboundedly while scrolling the feed repeatedly.
+
+---
+
+## 6. Consolidated Open Questions
+
+| Ref | Area | Question |
+|-----|------|----------|
+| ⚠️ `FAD-PERF-a` | Concurrency | GCD, Combine, or `async/await` for the image pipeline? The brief says GCD; the codebase says Combine. |
+| `FAD-PERF-b` | Caching | Cache implementation and eviction policy; memory-only or disk-backed. |
+| `FAD-PERF-c` | Images | Downsampling primitive — `ImageIO` thumbnails vs. the existing `UIImage.resize(_:)`. |
+| `FAD-DATA-a` | Decoding | Mechanism for per-element lenient decoding. |
+| ⚠️ `FAD-DATA-b` | Errors | Replacement error type for `URLError` in `BaseService`, able to express HTTP status. |
+| `FAD-DATA-c` | Errors | Visual treatment of the error state. |
+| `FAD-DATA-d` | Identity | Stable identity for `Tweet` — the payload carries no id. |
+| `FAD-LAYOUT-a` | Layout | Whether `HeaderView`'s fixed 370pt height becomes proportional. |
+| `FAD-LAYOUT-b` | Layout | Whether Dynamic Type is pursued at all. |
+| `FAD-TEST-a` | Testing | How integration tests are separated from the offline suite. |
+| `FAD-TEST-b` | Testing | Swift Testing vs. XCTest. |
+| `FAD-TEST-c` | Testing | Fate of `TestDataConfig.swift`. |
+
+---
+
+*All requirement IDs (`NFR-PERF-*`, `NFR-DATA-*`, `NFR-LAYOUT-*`, `NFR-TEST-*`) are stable and may be referenced by architecture, implementation, and test documents. This document defines requirements only; no production code is affected by it.*
