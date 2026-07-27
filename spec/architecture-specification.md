@@ -132,13 +132,26 @@ WeChatMoments/
 
 **Files migrate when the feature that touches them is next modified. There is no big-bang move.**
 
-This is a hard rule, not a preference, and the reason is mechanical: `WeChatMoments.xcodeproj/project.pbxproj` uses the **old explicit-file-listing format** (`objectVersion = 56`; no `PBXFileSystemSynchronizedRootGroup` anywhere). Every group carries a `path` that mirrors a real directory, and every Swift file has its own `PBXFileReference`, a `PBXBuildFile`, and an entry in the target's `PBXSourcesBuildPhase`. Moving one file therefore costs three coordinated pbxproj edits, and a mistake corrupts the project for everyone.
+The rule is about diff readability, not mechanics: a commit that moves files *and* changes them is reviewable; a commit that only shuffles paths is noise. Since `FAD-ARCH-a` was ratified (§2.5) the project uses synchronized folder groups, so a move is a pure filesystem operation with no `project.pbxproj` edit and no risk of corrupting the project.
 
 Consequences:
 
-- Restructuring is done **through Xcode's UI**, not by hand-editing `project.pbxproj`, and only alongside work that already touches the file.
-- A pull request that only moves files is a bad trade in this project — the diff is unreadable and the risk is real.
-- Migrating the project to `objectVersion = 77` with synchronized folders would make folder moves free, but requires Xcode 16+ and is a separate decision (`FAD-ARCH-a`, §13).
+- Adding, moving, renaming, or deleting a file is done on disk. Xcode picks it up automatically; `project.pbxproj` is not touched and must not appear in the diff.
+- A pull request that only moves files is still a bad trade — bundle the move with the work that motivates it.
+
+### 2.5 Resolved: synchronized folder groups (`FAD-ARCH-a`) ✅
+
+Ratified **2026-07-27**.
+
+The project was migrated from `objectVersion = 56` (explicit file listing) to `objectVersion = 77` with a `PBXFileSystemSynchronizedRootGroup` per target.
+
+**Why.** Under the old format each new file cost three coordinated pbxproj edits — a `PBXFileReference`, a `PBXGroup.children` entry, and a `PBXBuildFile` plus its `PBXSourcesBuildPhase` entry. The implementation sequence that follows adds roughly fifteen files, so the old format meant ~45 chances to corrupt a file that nothing but Xcode validates. The migration converts that into one contained, immediately-verifiable risk.
+
+**What it cost.** `project.pbxproj` shrank from 33.1 KB to 20.0 KB — all of it bookkeeping that the filesystem already expresses. Requires Xcode 16+; this project builds on Xcode 26.2.
+
+**Assumptions carried:** every file inside `WeChatMoments/`, `WeChatMomentsTests/`, and `WeChatMomentsUITests/` belongs to that target. This holds today. A file that must be excluded needs a `PBXFileSystemSynchronizedBuildFileExceptionSet`, which is the one thing the old format expressed more directly.
+
+**Verified:** clean build compiles all 17 source files, and the test suite produces results identical to the pre-migration baseline — the same two pre-existing failures, unchanged.
 
 ### 2.4 Rules
 
@@ -374,9 +387,9 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 Recorded rather than guessed. None of these blocks establishing the structure above.
 
-1. **`FAD-ARCH-a` — pbxproj format.** Migrate to `objectVersion = 77` with `PBXFileSystemSynchronizedRootGroup`s (Xcode 16+), which makes the §2.2 migration free? Or stay on the current format and pay the three-edit cost per file move? Staying is the status quo and is assumed until decided.
-2. **`FAD-ARCH-b` — no shared Xcode scheme.** ⚠️ The only scheme lives in `WeChatMoments.xcodeproj/xcuserdata/`, so it is not in git and `xcodebuild -scheme WeChatMoments` works **only on the original author's machine**. Every build and test command in `CLAUDE.md` and in this spec depends on it. Moving it to `xcshareddata/xcschemes/` and committing it is a small change with outsized value for a reviewer cloning the repo, and it is a prerequisite for the test-plan option in `FAD-TEST-a`. *Deliberately deferred — not part of the current specification pass.*
-3. **`FAD-ARCH-c` — duplicate bundle identifier.** The UI-test target's `PRODUCT_BUNDLE_IDENTIFIER` is `com.gl.WeChatMomentsTests`, identical to the unit-test bundle's. This is a project-configuration defect; it has not yet caused a visible failure but should be corrected.
+1. **`FAD-ARCH-a` — pbxproj format.** **Resolved 2026-07-27 ✅** — see §2.5.
+2. **`FAD-ARCH-b` — no shared Xcode scheme.** ⚠️ The only scheme lives in `WeChatMoments.xcodeproj/xcuserdata/`, so it is not in git and `xcodebuild -scheme WeChatMoments` works **only on the original author's machine**. Every build and test command in `CLAUDE.md` and in this spec depends on it. Moving it to `xcshareddata/xcschemes/` and committing it is a small change with outsized value for a reviewer cloning the repo, and it is a prerequisite for the test-plan option in `FAD-TEST-a`. *Deliberately deferred.*
+3. **`FAD-ARCH-c` — withdrawn 2026-07-27.** This entry claimed the UI-test target's `PRODUCT_BUNDLE_IDENTIFIER` duplicated the unit-test bundle's. **It was wrong.** The identifiers are `com.gl.WeChatMomentsTests` and `com.gl.WeChatMomentsUITests` respectively and always were. The claim entered this document unverified; it is retained here as a withdrawal rather than deleted, per the deprecate-in-place rule in [`README.md §4`](./README.md).
 4. **`FAD-ARCH-d` — composition root.** The target layout (§2.2) introduces `App/RootView.swift` to construct the view model and its services. Whether this is worth a file for a single screen, versus constructing in `WeChatMomentsApp`, is open. It becomes clearly worthwhile the moment §5.2's injection fix lands, because something has to supply the dependencies.
 5. **`FAD-PERF-a` — concurrency mechanism** (§8.3). Owned by `non-functional-requirements.md §1.9`; restated here because it shapes `Services/ImageLoader.swift`.
 6. **`FAD-DATA-b` — the `BaseService` failure type** (§5.2). Owned by `non-functional-requirements.md §2.9`; restated here because it changes a protocol signature in this document.
