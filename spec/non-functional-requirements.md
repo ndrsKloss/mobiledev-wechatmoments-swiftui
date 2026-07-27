@@ -107,17 +107,17 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `NFR-DATA-001` | MUST | The feed **MUST** be decoded **element by element**. A element that fails to decode **MUST** be skipped, leaving the remaining elements intact. ⛔ *Not met — `TweetService` decodes `[Tweet].self` atomically; see the trap described in `fn-spec §3.3`.* |
+| `NFR-DATA-001` | MUST | The feed **MUST** be decoded **element by element**. A element that fails to decode **MUST** be skipped, leaving the remaining elements intact. |
 | `NFR-DATA-002` | MUST | Every optional field in the data contract **MUST** be modelled as optional in Swift, and every consumer **MUST** handle its absence. |
 | `NFR-DATA-003` | MUST | HTTP responses **MUST** be status-validated before decoding; a non-2xx status **MUST** produce a typed error. ⛔ *Not met — `HttpService.get(url:)` does `.map(\.data)`, discarding the `HTTPURLResponse` entirely, so the catch-all stub's 404 JSON body is handed to the decoder as if it were success data (`FR-API-005`).* |
 | `NFR-DATA-004` | MUST | A failed or missing image **MUST** render the placeholder asset (`Constants.DEFAULT_EMPTY_IMAGE`). Force-unwrapping an image result is **forbidden**. ⛔ *Not met — `HeaderView.setProfileImage(for:)`, `TweetView.avatar(_from:)`, and `TweetView.fetchImage(_from:)` all force-unwrap `image!` inside their callbacks.* |
 | `NFR-DATA-005` | MUST | Errors **MUST** be surfaced to the view model as typed values that the view can render (`FR-FEED-004`). ⛔ *Not met — `MomentsViewModel.completionHandler` `print`s the error and discards it.* |
 | `NFR-DATA-006` | SHOULD | Diagnostic logging of dropped elements **SHOULD** be available in DEBUG builds (see `fn-spec §8 Q5`). |
-| `NFR-DATA-007` | MUST | List identity **MUST** be stable and unique. ⛔ *Not met — `MomentView` uses `ForEach(tweets, id: \.self)` and `Tweet`'s `Hashable` conformance is synthesised from its single `content` property, so two tweets with identical (or `nil`) content collide. Expanding the model per `FR-API-003` mitigates this only by accident; an explicit stable identity is required.* |
+| `NFR-DATA-007` | MUST | List identity **MUST** be stable and unique. |
 
 ### 2.5 Engineering constraints
 
-- Per-element decoding is conventionally implemented with a `Decodable` wrapper that attempts the real type inside a `try?` and stores `nil` on failure, applied as `[FailableDecodable<Tweet>]`. The mechanism is not mandated — only the behaviour of `NFR-DATA-001` is.
+- Per-element decoding is implemented with a `Decodable` wrapper that attempts the real type inside a `try?` and stores `nil` on failure, applied as `[FailableDecodable<Tweet>]` — ratified as `FAD-DATA-a` (§2.10). Only the behaviour of `NFR-DATA-001` is mandated; the mechanism is a decision, not a requirement.
 - Status validation belongs in `HttpService`, the single `URLSession` boundary (`arch-spec §5`), not duplicated into each feature service.
 - The `URLError` failure type in `BaseService.get(url:)` is too narrow to express "HTTP 404"; widening it is part of satisfying `NFR-DATA-003` (`FAD-DATA-b`).
 
@@ -140,11 +140,37 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 
 ### 2.9 Unresolved decisions (Future Architecture Decisions)
 
-- **`FAD-DATA-a`:** the per-element decoding mechanism (`NFR-DATA-001`) — failable wrapper, manual `UnkeyedDecodingContainer` iteration, or decoding to `[JSONValue]` first.
+- **`FAD-DATA-a`:** **Resolved 2026-07-27 ✅** — see §2.10.
 - **`FAD-DATA-b`:** the error type flowing through `BaseService`. `URLError` cannot express an HTTP status; a project error enum is the obvious replacement but changes the protocol signature (`arch-spec §5`).
 - **`FAD-DATA-c`:** the visual treatment of the error state — inline row, full-screen replacement, or a retry banner. Currently unspecified anywhere.
-- **`FAD-DATA-d`:** the stable identity for `Tweet` (`NFR-DATA-007`) — a synthesised `UUID` assigned at decode time, or a composite of sender + content + index. The payload carries no id field.
+- **`FAD-DATA-d`:** **Resolved 2026-07-27 ✅** — see §2.11.
 - **Assumption:** no retry policy is required for this exercise; a failed request stays failed until the user refreshes.
+
+### 2.10 Resolved: per-element decoding mechanism (`FAD-DATA-a`) ✅
+
+Ratified **2026-07-27**.
+
+A generic failable wrapper, `Models/FailableDecodable.swift`, whose `init(from:)` is `value = try? Wrapped(from: decoder)`. `TweetService` decodes `[FailableDecodable<Tweet>]` and compact-maps `\.value`.
+
+**Why.** Four lines, no decoding mechanics in the service, and it reuses `Decodable` synthesis for `Tweet` itself rather than replacing it. The alternatives — hand-rolling an `UnkeyedDecodingContainer` loop, or decoding to an intermediate `[JSONValue]` and re-encoding — both cost substantially more code and put transport-shaped logic where domain logic belongs (`arch-spec §5.3`).
+
+**Scope of the tolerance.** It is applied at the **feed array only**. `User` and `Comment` have all-optional fields and cannot throw. `Img.url` is non-optional, so a malformed image object would drop its whole tweet rather than just that image. No such element exists in the served feed, and nesting the wrapper inside `images` was judged defensiveness beyond the contract. **Assumption carried:** if the feed ever serves a malformed image object, this is the requirement that bends first.
+
+**Verified:** `TweetDecodingTests` decodes the committed fixture offline — 22 elements in, 17 out, 5 dropped — and `test_strict_decoding_of_the_whole_array_fails` asserts the strict path still fails, which is what makes the lenient path necessary rather than ornamental.
+
+### 2.11 Resolved: stable `Tweet` identity (`FAD-DATA-d`) ✅
+
+Ratified **2026-07-27**.
+
+`Tweet` conforms to `Identifiable` with `let id = UUID()`, excluded from `CodingKeys`. `Tweet` no longer conforms to `Hashable`, and `MomentView` uses `ForEach(tweets)` rather than `ForEach(tweets, id: \.self)`.
+
+**Why.** The payload carries no id, so identity has to be manufactured. A `UUID` assigned at decode time cannot collide, needs no knowledge of the payload's shape, and does not drag `Hashable` conformance onto `User`, `Img`, and `Comment` — three conformances that would exist solely to serve a list key.
+
+**Why not a composite of sender + content + index.** Index is positional. The displayed window moves under pagination (`FR-PAGE-002`) and resets on refresh (`FR-PAGE-004`), so a positional component would change identity for rows that did not change, which is precisely the diffing bug the requirement exists to prevent.
+
+**Assumption carried:** identity is per-decode, not per-tweet-in-the-world. Re-fetching the feed mints new ids. That is correct for `FR-PAGE-004` as currently read (refresh resets the window without re-fetching, `fn-spec §8 Q2`) and would need revisiting only if refresh becomes a re-fetch.
+
+**Verified:** `TweetDecodingTests.test_identity_is_unique_across_identical_content`.
 
 ---
 
@@ -217,7 +243,7 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 |----|-------|-------------|
 | `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. ⛔ *Not met — `TweetService.init()` and `UserService.init()` both construct `HttpService()` internally. The `BaseService` protocol exists and the property is typed against it, but nothing can supply a different implementation, so the seam is decorative.* |
 | `NFR-TEST-002` | MUST | Unit tests **MUST NOT** require a live network or a running mountebank instance. ⛔ *Not met — all three service test classes (`HttpServiceTests`, `TweetServiceTests`, `UserServiceTests`) hit `localhost:2727`, so `xcodebuild test` fails outright without the mock server.* |
-| `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. ⛔ *Not met — the file is bundled into the test target but never read; no `Bundle` lookup exists anywhere in the test target.* |
+| `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. |
 | `NFR-TEST-004` | MUST | Tests that genuinely require mountebank **MUST** be identifiable as integration tests — by naming, by target, or by a documented `-only-testing` selector — so that the offline suite can be run alone. |
 | `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). |
 | `NFR-TEST-006` | SHOULD | Data transforms — filtering (`FR-DATA-*`), paging windows, grid-column derivation — **SHOULD** be pure functions over their inputs, so they can be tested without any object graph. This is the concrete form the brief's "functional programming is appreciated" takes. |
@@ -275,10 +301,10 @@ Cross-cutting checks for every row: no main-thread stalls while scrolling; no ma
 | ⚠️ `FAD-PERF-a` | Concurrency | GCD, Combine, or `async/await` for the image pipeline? The brief says GCD; the codebase says Combine. |
 | `FAD-PERF-b` | Caching | Cache implementation and eviction policy; memory-only or disk-backed. |
 | `FAD-PERF-c` | Images | Downsampling primitive — `ImageIO` thumbnails vs. the existing `UIImage.resize(_:)`. |
-| `FAD-DATA-a` | Decoding | Mechanism for per-element lenient decoding. |
+| ~~`FAD-DATA-a`~~ | Decoding | Mechanism for per-element lenient decoding. **Resolved 2026-07-27 ✅** — §2.10. |
 | ⚠️ `FAD-DATA-b` | Errors | Replacement error type for `URLError` in `BaseService`, able to express HTTP status. |
 | `FAD-DATA-c` | Errors | Visual treatment of the error state. |
-| `FAD-DATA-d` | Identity | Stable identity for `Tweet` — the payload carries no id. |
+| ~~`FAD-DATA-d`~~ | Identity | Stable identity for `Tweet` — the payload carries no id. **Resolved 2026-07-27 ✅** — §2.11. |
 | `FAD-LAYOUT-a` | Layout | Whether `HeaderView`'s fixed 370pt height becomes proportional. |
 | `FAD-LAYOUT-b` | Layout | Whether Dynamic Type is pursued at all. |
 | `FAD-TEST-a` | Testing | How integration tests are separated from the offline suite. |

@@ -20,7 +20,10 @@ class TweetService {
 
         return httpService
             .get(url: url)
-            .decode(type: [Tweet].self, decoder: JSONDecoder())
+            // NFR-DATA-001 / FR-API-004: decode per element, so one malformed element
+            // costs one tweet instead of the whole feed. See fn-spec §3.3.
+            .decode(type: [FailableDecodable<Tweet>].self, decoder: JSONDecoder())
+            .map { $0.compactMap(\.value) }
             .eraseToAnyPublisher()
     }
 }

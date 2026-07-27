@@ -97,5 +97,17 @@ struct TweetView: View {
 }
 
 #Preview {
-    TweetView(tweet: Tweet(content: "Unlike many proprietary big data processing platform different, Spark is built on a unified abstract RDD, making it possible to deal with different ways consistent with large data processing scenarios, including MapReduce, Streaming, SQL, Machine Learning and Graph so on. To understand the Spark, you have to understand the RDD."))
+    TweetView(
+        tweet: Tweet(
+            sender: User(
+                username: "wfan",
+                nick: "Wei Fan",
+                avatar: "https://techops-recsys-lateral-hiring.github.io/moments-data/images/user/avatar/005.jpeg",
+                profile: nil
+            ),
+            content: "Unlike many proprietary big data processing platform different, Spark is built on a unified abstract RDD, making it possible to deal with different ways consistent with large data processing scenarios, including MapReduce, Streaming, SQL, Machine Learning and Graph so on. To understand the Spark, you have to understand the RDD.",
+            images: nil,
+            comments: nil
+        )
+    )
 }

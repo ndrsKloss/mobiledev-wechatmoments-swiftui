@@ -55,11 +55,11 @@ Served payload:
 }
 ```
 
-⚠️ **The profile-image key is hyphenated.** The payload key is `profile-image`; the Swift property is `User.profile`, and `Model/MyModels.swift` declares **no `CodingKeys`**. `profile` therefore always decodes to `nil`, `HeaderView.setProfileImage(for:)` never runs, and the cover image can never appear. This is a live defect, not a hypothetical.
+**The profile-image key is hyphenated.** The payload key is `profile-image` and the Swift property is `User.profile`, so the mapping must be declared explicitly. `Models/User.swift` does so (`case profile = "profile-image"`). *Until commit 01 there were no `CodingKeys` at all, so `profile` always decoded to `nil` and the cover image could never appear — the cover image will not actually render until the image loader lands (`NFR-PERF-002`).*
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `FR-API-001` | MUST | The user model **MUST** map the payload key `profile-image` onto its profile-image property via `CodingKeys`. ⛔ *Not met — `Model/MyModels.swift` has no `CodingKeys`.* |
+| `FR-API-001` | MUST | The user model **MUST** map the payload key `profile-image` onto its profile-image property via `CodingKeys`. |
 | `FR-API-002` | MUST | All four user fields (`username`, `nick`, `avatar`, `profile-image`) **MUST** be treated as optional; a missing field renders a fallback (`NFR-DATA-004`), never a crash. |
 
 ### 3.2 `GET /user/{username}/tweets` — the feed
@@ -96,12 +96,14 @@ Two entries carry `"comments": []` — an *empty* comment array, distinct from a
 
 **Displayable tweets = 15.** (17 elements have a `sender`; 2 of those have neither content nor images and are dropped by `FR-DATA-001`.) At 5 per page that is 3 full pages plus a partial — enough to exercise `FR-PAGE-*` end-to-end.
 
-⚠️ **The whole-array decode trap.** `TweetService` calls `.decode(type: [Tweet].self, …)`. This succeeds *today* only because `Tweet` declares a single optional property, so the five malformed elements decode into `Tweet(content: nil)`. The moment `Tweet` gains a non-optional `sender`, `Decodable` synthesis makes those five elements throw — and because `JSONDecoder` fails the container atomically, **the entire feed request fails**. Expanding the model without also implementing per-element lenient decoding (`NFR-DATA-001`) will take the app from partly-working to entirely blank.
+**The whole-array decode trap.** `JSONDecoder` fails a container **atomically**: one malformed element aborts the entire array. Because `Tweet.sender` is non-optional, the five malformed elements throw, so decoding the feed as `[Tweet]` fails outright and would leave the app entirely blank. `TweetService` therefore decodes `[FailableDecodable<Tweet>]` and compact-maps the result (`NFR-DATA-001`), which costs one tweet per malformed element instead of the whole feed.
+
+This coupling is load-bearing and easy to undo by accident: relaxing `sender` back to optional would make the tolerance decorative, and dropping the tolerance would blank the feed. `TweetDecodingTests.test_strict_decoding_of_the_whole_array_fails` pins the first half of that invariant.
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `FR-API-003` | MUST | The tweet model **MUST** decode `sender`, `content`, `images`, and `comments`. ⛔ *Not met — `Tweet` decodes only `content`; `Comment`, `User`, and `Img` exist but are unreferenced by `Tweet`.* |
-| `FR-API-004` | MUST | A malformed element in the feed array **MUST NOT** fail the decode of the remaining elements. See `NFR-DATA-001` for the mechanism. ⛔ *Not met.* |
+| `FR-API-003` | MUST | The tweet model **MUST** decode `sender`, `content`, `images`, and `comments`. |
+| `FR-API-004` | MUST | A malformed element in the feed array **MUST NOT** fail the decode of the remaining elements. See `NFR-DATA-001` for the mechanism. |
 | `FR-API-005` | MUST | A non-2xx HTTP response **MUST** be surfaced as an error, not passed to the decoder. ⛔ *Not met — `HttpService.get(url:)` maps away the `HTTPURLResponse`, so the catch-all stub's 404 body flows straight into `.decode`. See `NFR-DATA-003`.* |
 | `FR-API-006` | MUST | Image and avatar URLs point at a **real remote host** (`techops-recsys-lateral-hiring.github.io`); the mock serves JSON only. Image loading is therefore genuinely networked and **MUST** obey `NFR-PERF-*`. |
 

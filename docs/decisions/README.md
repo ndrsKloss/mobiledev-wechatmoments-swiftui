@@ -9,7 +9,7 @@ These notes answer "why is the code like this?". They are not requirements — r
 | # | Note | README bullet | Commit |
 |---|------|---------------|--------|
 | 00 | [Synchronized folder groups](./00-synchronized-folder-groups.md) | *enabling — no bullet* | `chore(project): adopt synchronized folder groups…` |
-| 01 | Tweet model and lenient decoding | *enabling — no bullet* | pending |
+| 01 | [Tweet model and lenient decoding](./01-tweet-model-and-lenient-decoding.md) | *enabling — no bullet* | `feat(model): decode sender, images and comments with per-element tolerance…` |
 | 02 | Network hardening and injection | *enabling — no bullet* | pending |
 | 03 | Async image loader with cache | *enabling — no bullet* | pending |
 | 04 | Profile header | "The page consists of profile image, avatar and tweets list" | pending |

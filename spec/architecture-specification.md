@@ -68,8 +68,9 @@ Adding any of these requires a stated reason and a spec change — not a passing
 WeChatMoments/
 ├── WeChatMomentsApp.swift      # @main App → MomentView()
 ├── MomentView.swift            # ⚠️ root screen, sitting OUTSIDE View/
-├── Model/
-│   └── MyModels.swift          # ⚠️ four types in one file: Comment · User · Img · Tweet
+├── Models/
+│   ├── Tweet.swift · User.swift · Comment.swift · Img.swift   # one type per file
+│   └── FailableDecodable.swift # per-element decoding wrapper (NFR-DATA-001)
 ├── View/
 │   ├── HeaderView.swift        # profile banner + avatar + nick
 │   ├── TweetView.swift         # tweet cell (placeholders only)
@@ -111,6 +112,7 @@ WeChatMoments/
 │           └── ImageGridLayout.swift   # pure grid-column derivation (NFR-TEST-006)
 ├── Models/
 │   ├── Tweet.swift · User.swift · Comment.swift · Img.swift   # one type per file
+│   └── FailableDecodable.swift     # per-element decoding wrapper (FAD-DATA-a)
 ├── Services/
 │   ├── HttpService.swift       # BaseService protocol + HttpService
 │   ├── TweetService.swift
@@ -345,7 +347,7 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 ### 10.2 Fixtures
 
-`WeChatMomentsTests/Resources/Tweets.json` is the canonical offline payload and mirrors what `imposters.ejs` serves, including all five malformed elements. ⛔ *It is bundled into the test target but **never read** — there is no `Bundle` lookup anywhere in the test target. `NFR-TEST-003` makes it the required source for decoding tests.*
+`WeChatMomentsTests/Resources/Tweets.json` is the canonical offline payload and mirrors what `imposters.ejs` serves, including all five malformed elements. *It is read by `WeChatMomentsTests/Models/TweetDecodingTests.swift` via `Bundle(for:).url(forResource:)`, satisfying `NFR-TEST-003`. Bundle membership is derived from the synchronized folder group (§2.5), not from an explicit `PBXResourcesBuildPhase` entry — confirmed working, and the reason `test_fixture_has_22_elements` exists as a guard.*
 
 `WeChatMomentsTests/Config/TestDataConfig.swift` holds a second, inline set of JSON fixtures that overlaps with it. Two competing fixture sources is worse than either alone; its fate is `FAD-TEST-c`.
 
@@ -364,7 +366,7 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 ## 11. Naming and File Organization Conventions
 
-- **One type per file**, and the file is named for that type. ⛔ *`Model/MyModels.swift` holds four types (`Comment`, `User`, `Img`, `Tweet`) under a name that describes none of them. Split as the models are expanded for `FR-API-003`.*
+- **One type per file**, and the file is named for that type. *`Model/MyModels.swift` held four types under a name that described none of them; it was split into `Models/{Tweet,User,Comment,Img}.swift` in commit 01 alongside the expansion for `FR-API-003`.*
 - **Role suffixes:** `…View`, `…ViewModel`, `…Service`, `…Loader`, `…Helper`. Protocols describing a capability are named for the capability (`BaseService`, `ImageLoading`).
 - **Folders are plural** when they hold a collection of peers: `Models/`, `Services/`, `Extensions/`, `Mocks/`. ⛔ *`Service/` and `Extension/` are currently singular, inconsistently with `Utils/`.*
 - **Singular/plural consistency within a feature.** ⛔ *`MomentView` (singular) pairs with `MomentsViewModel` (plural). The screen shows moments; both should be plural.*

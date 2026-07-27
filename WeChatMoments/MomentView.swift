@@ -28,7 +28,9 @@ struct MomentView: View {
         List {
             Group {
                 HeaderView(user: user)
-                ForEach(tweets, id: \.self) { tweet in
+                // NFR-DATA-007: Tweet carries its own stable id; \.self would collide
+                // on duplicate content.
+                ForEach(tweets) { tweet in
                     TweetView(tweet: tweet)
                     Divider()
                 }
