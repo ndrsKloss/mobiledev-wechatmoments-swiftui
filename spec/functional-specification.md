@@ -119,11 +119,11 @@ Any unmatched path returns **404** with `{"error": "User not found"}`. The exist
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `FR-HEADER-001` | MUST | The header **MUST** display the user's profile image as a full-bleed banner, the user's avatar, and the user's nick. ⛔ *Partially met — profile image blocked by `FR-API-001`; avatar blocked by `NFR-PERF-002` (see below).* |
-| `FR-HEADER-002` | MUST | Each of the three elements **MUST** render a placeholder when its source is missing or fails to load — never an empty gap and never a crash. ⛔ *Not met — `HeaderView.setProfileImage(for:)` force-unwraps `image!` inside the load callback.* |
+| `FR-HEADER-001` | MUST | The header **MUST** display the user's profile image as a full-bleed banner, the user's avatar, and the user's nick. *Both blockers are cleared — the `profile-image` key since commit 01 (`FR-API-001`), the loader since commit 03 (`NFR-PERF-002`). `HeaderView` reads `user?.profile` and `user?.avatar` through `RemoteImage`; the nick is derived from `user` rather than mirrored into `@State`. Visual acceptance against the reference screenshots remains open (§7).* |
+| `FR-HEADER-002` | MUST | Each of the three elements **MUST** render a placeholder when its source is missing or fails to load — never an empty gap and never a crash. *`RemoteImage` falls back to `Constants.DEFAULT_EMPTY_IMAGE` on every failure path; the `image!` force-unwrap in `setProfileImage(for:)` went with the method in commit 03.* |
 | `FR-HEADER-003` | SHOULD | The header **SHOULD** scroll with the feed rather than pin to the top. |
 
-Note on the avatar: `HeaderView.setAvatarImage(for:)` calls the **synchronous** `ImageHelper.getImage(_:forSize:)` overload, which unconditionally `return nil`. The avatar therefore never loads either. Fixing this is `NFR-PERF-002`.
+*The banner is downsampled to the width it actually occupies, read from the enclosing `GeometryReader`, rather than to `Constants.SENDER_PROFILE_SIZE` (75×75) as the old code asked for — that would have thumbnailed a full-bleed cover image to avatar size.*
 
 ### 4.2 Feed loading (`FR-FEED`)
 
@@ -161,7 +161,7 @@ The brief's three pagination sentences, made precise. **Page size is 5.**
 | `FR-TWEET-007` | MUST | Each comment row **MUST** show the commenter's nick followed by the comment text, visually distinguished (the nick tinted, per the reference screenshots `[I]`). The comment block sits on its own background fill (`Extension/Color.swift`). |
 | `FR-TWEET-008` | SHOULD | A tweet cell **SHOULD** be visually separated from the next by a hairline rule. `View/FooterView.swift` exists for this purpose and **SHOULD** be used in place of the ad-hoc `Divider()` currently in `MomentView`. |
 
-⚠️ **A structural note on `TweetView`'s image helpers.** `avatar(_from:)` and `fetchImage(_from:)` both call the *asynchronous* closure overload of `ImageHelper.getImage` and then immediately `return` a local variable the callback has not yet written. They can only ever return the placeholder / `nil`. Separately, `addImagesToView(_from:)` ends in `.padding() as? AnyView`, a cast that always yields `nil` because `padding()` returns a `ModifiedContent`, not an `AnyView`. Both helpers are structurally incapable of working and must be rewritten, not patched — see `arch-spec §8`.
+**A structural note on `TweetView`'s image helpers — resolved in commit 03, recorded here as history.** `avatar(_from:)` and `fetchImage(_from:)` both called the *asynchronous* closure overload of `ImageHelper.getImage` and then immediately `return`ed a local variable the callback had not yet written, so they could only ever return the placeholder / `nil`. Separately, `addImagesToView(_from:)` ended in `.padding() as? AnyView`, a cast that always yielded `nil` because `padding()` returns a `ModifiedContent`, not an `AnyView` — so the grid never drew anything at all. All three were deleted rather than patched (`arch-spec §8`). The avatar slot is now a `RemoteImage`; the ⛔ markers above stay because it is still fed `nil` rather than `tweet.sender.avatar`, and the grid has yet to be written.
 
 ### 4.5 Data filtering (`FR-DATA`)
 

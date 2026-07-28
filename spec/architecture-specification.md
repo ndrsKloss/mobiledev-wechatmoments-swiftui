@@ -66,14 +66,15 @@ Adding any of these requires a stated reason and a spec change — not a passing
 
 ```
 WeChatMoments/
-├── WeChatMomentsApp.swift      # @main App → MomentView()
+├── WeChatMomentsApp.swift      # @main App → MomentView(), injects the shared ImageLoader
 ├── MomentView.swift            # ⚠️ root screen, sitting OUTSIDE View/
 ├── Models/
 │   ├── Tweet.swift · User.swift · Comment.swift · Img.swift   # one type per file
 │   └── FailableDecodable.swift # per-element decoding wrapper (NFR-DATA-001)
 ├── View/
 │   ├── HeaderView.swift        # profile banner + avatar + nick
-│   ├── TweetView.swift         # tweet cell (placeholders only)
+│   ├── TweetView.swift         # tweet cell (sender/grid still placeholders)
+│   ├── RemoteImage.swift       # async image view owning its @State image + token (§8.4)
 │   ├── CommentRowView.swift    # not wired in
 │   └── FooterView.swift        # not wired in
 ├── ViewModel/
@@ -82,16 +83,17 @@ WeChatMoments/
 │   ├── HttpService.swift       # BaseService protocol + HttpService
 │   ├── NetworkError.swift      # the single failure type (FAD-DATA-b)
 │   ├── TweetService.swift
-│   └── UserService.swift
+│   ├── UserService.swift
+│   └── ImageLoader.swift       # ImageLoading protocol + GCD-backed cached loader (§8)
 ├── Mocks/                      # #if DEBUG — shared by previews and tests
-│   └── MockBaseService.swift
+│   ├── MockBaseService.swift
+│   └── MockImageLoader.swift
 ├── Config/
 │   ├── Constant.swift          # enum Constants (⚠️ SCREAMING_SNAKE members)
 │   └── UrlConstant.swift       # enum UrlConstant
-├── Utils/
-│   └── ImageHelper.swift
 ├── Extension/                  # ⚠️ singular
-│   ├── Color.swift · String.swift · UIImage.swift
+│   ├── Color.swift · String.swift
+│   └── EnvironmentValues+ImageLoader.swift   # the ImageLoading injection point
 ├── Assets.xcassets/
 └── Preview Content/
 ```
@@ -113,6 +115,8 @@ WeChatMoments/
 │       ├── FooterView.swift
 │       └── Support/
 │           └── ImageGridLayout.swift   # pure grid-column derivation (NFR-TEST-006)
+├── View/
+│   └── RemoteImage.swift       # feature-agnostic: any URL, any size (§8.4)
 ├── Models/
 │   ├── Tweet.swift · User.swift · Comment.swift · Img.swift   # one type per file
 │   └── FailableDecodable.swift     # per-element decoding wrapper (FAD-DATA-a)
@@ -120,12 +124,12 @@ WeChatMoments/
 │   ├── HttpService.swift       # BaseService protocol + HttpService
 │   ├── TweetService.swift
 │   ├── UserService.swift
-│   └── ImageLoader.swift       # ImageLoading protocol + cached async impl (§8)
+│   └── ImageLoader.swift       # ImageLoading protocol + GCD-backed cached loader (§8)
 ├── Config/
 │   ├── Constants.swift
 │   └── UrlConstant.swift
 ├── Extensions/
-│   └── Color+Moments.swift · String+Height.swift · UIImage+Resize.swift
+│   └── Color+Moments.swift · String+Height.swift · EnvironmentValues+ImageLoader.swift
 ├── Mocks/                      # #if DEBUG — shared by previews and tests
 │   ├── MockBaseService.swift
 │   └── MockImageLoader.swift
@@ -256,7 +260,7 @@ A decode failure is *also* a `NetworkError` — `.decoding(Error)` — so a feat
 - **Default arguments** supply the production implementation, so injection costs nothing at call sites (§5.2).
 - **Protocols are introduced where they buy testability or decoupling** — currently `BaseService`, and `ImageLoading` once §8 lands. Nothing else needs one.
 - **Do not abstract for its own sake.** A protocol with exactly one implementation and no test double is dead weight. Conversely, a protocol whose only implementation is hard-coded into its consumer — the current `BaseService` situation — is worse than no protocol, because it advertises a flexibility that does not exist.
-- `ImageHelper.shared` is currently a singleton. Replacing it with an injected `ImageLoading` (§8) is required by `NFR-TEST-001`; a singleton is acceptable only for genuinely process-wide, stateless utilities, which a cache is not.
+- `ImageHelper.shared` was a singleton. It was replaced in commit 03 by an injected `ImageLoading` (§8), as `NFR-TEST-001` requires; a singleton is acceptable only for genuinely process-wide, stateless utilities, which a cache is not. The injection runs through `EnvironmentValues.imageLoader` rather than a constructor argument, because `RemoteImage` sits several levels below the composition root and a defaulted argument would have built a fresh loader — and therefore a fresh, empty cache — per view.
 
 ---
 
@@ -298,16 +302,32 @@ The view detects "scrolled to the bottom" and calls `loadNextPage()`. The detect
 
 ## 8. Image Loading Architecture
 
-The current `Utils/ImageHelper.swift` is 25 lines and structurally unsound: a synchronous overload that returns `nil` unconditionally, an asynchronous overload that blocks on `Data(contentsOf:)` and never calls back on failure, no cache, and a `forSize:` parameter it ignores. It is not patchable; it is replaced.
+`Utils/ImageHelper.swift` was 25 lines and structurally unsound: a synchronous overload that returned `nil` unconditionally, an asynchronous overload that blocked on `Data(contentsOf:)` and never called back on failure, no cache, and a `forSize:` parameter it ignored. It was not patchable; it was deleted and replaced in commit 03.
 
 ### 8.1 The seam
 
 ```
 Services/ImageLoader.swift
-    protocol ImageLoading { … }          # injected into views/view models
-    final class ImageLoader: ImageLoading # cache + async fetch + cancellation
-Mocks/MockImageLoader.swift              # #if DEBUG
+    protocol ImageLoading: AnyObject { … }      # injected via EnvironmentValues.imageLoader
+    struct ImageRequestToken                    # opaque cancellation handle
+    final class ImageLoader: ImageLoading       # cache + GCD fetch + coalescing + cancellation
+Extension/EnvironmentValues+ImageLoader.swift   # the injection point
+View/RemoteImage.swift                     # the only consumer (§8.4)
+Mocks/MockImageLoader.swift                # #if DEBUG
 ```
+
+The surface is two methods:
+
+```swift
+@discardableResult
+func loadImage(from urlString: String?, targetSize: CGSize, displayScale: CGFloat,
+               completion: @escaping (UIImage?) -> Void) -> ImageRequestToken?
+func cancel(_ token: ImageRequestToken)
+```
+
+`UIImage?` rather than a typed error, because a missing avatar is a placeholder, not an error state — the distinction `NetworkError` exists to draw for the feed does not apply here. The returned token is `nil` when there is nothing left to cancel: a cache hit and an unusable URL both answer synchronously, inside the call. `displayScale` arrives with the request instead of living on the loader: it belongs to the display the image is bound for, and holding it on the loader would also mean reaching for `UIScreen` from a background queue.
+
+Internally, three queues: `URLSession`'s own for transport, a **serial** queue guarding the in-flight table (the lock-free way to make it safe), and a **concurrent** `.userInitiated` queue for ImageIO decoding. Completions land via `DispatchQueue.main.async` (`NFR-PERF-004`).
 
 ### 8.2 Requirements it must satisfy
 
@@ -321,13 +341,25 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 | `NFR-DATA-004` | Failure yields the placeholder asset, never a force-unwrap. |
 | `NFR-TEST-001` | Injected as a protocol, not reached through a singleton. |
 
-### 8.3 The mechanism is open
+### 8.3 The mechanism — resolved
 
-⚠️ Whether this is built on GCD, Combine, or `async/await` is **`FAD-PERF-a`** and is not decided here. The brief asks for GCD; the networking layer is Combine; SwiftUI's idiom is `async/await`. The protocol boundary in §8.1 is deliberately shaped so that the choice is an implementation detail behind it — which is the point of putting a protocol there at all.
+**`FAD-PERF-a` resolved 2026-07-27 ✅** in favour of **GCD**, which the brief asks for by name (`README.md` → *Tech requirements*). The reasoning, the cost, and the assumptions carried are in `non-functional-requirements.md §1.10`; `FAD-PERF-b` (§1.11) and `FAD-PERF-c` (§1.12) were ratified in the same commit.
+
+The protocol boundary in §8.1 is what made this a contained decision rather than a structural one, and that was demonstrated rather than asserted: an `async/await` implementation was built first and then replaced with the GCD one. The change touched `ImageLoader.swift`, `RemoteImage.swift`, `MockImageLoader.swift` and the tests — and nothing else in the app. `RemoteImage` names `ImageLoading`, never `ImageLoader`.
 
 ### 8.4 Call-site consequence
 
-`TweetView.avatar(_from:)` and `TweetView.fetchImage(_from:)` return an image *synchronously* after starting an asynchronous load — they can only ever return the placeholder (`fn-spec §4.4`). Views **MUST NOT** own image-loading state in a local variable. The correct shape is a small view that holds its own `@State` image and asks the loader once on appear, or SwiftUI's `AsyncImage` if `FAD-PERF-a` resolves that way.
+`TweetView.avatar(_from:)` and `TweetView.fetchImage(_from:)` returned an image *synchronously* after starting an asynchronous load, so they could only ever return the placeholder (`fn-spec §4.4`). Views **MUST NOT** own image-loading state in a local variable.
+
+`View/RemoteImage.swift` is the shape that replaced them: a small view holding its own `@State private var image: UIImage?` alongside the `@State private var token: ImageRequestToken?` it needs in order to cancel. Three lifecycle hooks, each load-bearing:
+
+- `.onAppear` starts the load, guarded on `image == nil, token == nil` — in a lazy container it fires again every time the row scrolls back.
+- `.onDisappear` cancels (`NFR-PERF-006`).
+- `.onChange(of: urlString)` cancels, clears, and reloads. Without it a reused row keeps the previous tweet's image, because the `@State` survives the reuse. This is the view-identity trap §12 exists to point at.
+
+`RemoteImage` applies `.resizable()` but never a `.frame`; sizing stays with the caller so no fixed width can leak in (`NFR-LAYOUT-001`).
+
+SwiftUI's own `AsyncImage` was the obvious alternative and is rejected: it offers no cache control, no downsampling, and no coalescing, so `NFR-PERF-003/006/007` would all have gone unmet.
 
 ---
 
@@ -347,7 +379,7 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 | Suite | Requires | Contents |
 |-------|----------|----------|
-| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; `HttpService` status validation against `Support/StubURLProtocol.swift`; `TweetService` / `UserService` against `MockBaseService`; filtering rules, pagination window transitions, and image-loader cache and failure paths once those land. |
+| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; `HttpService` status validation against `Support/StubURLProtocol.swift`; `TweetService` / `UserService` against `MockBaseService`; `ImageLoader`'s cache, coalescing, downsampling and failure paths against the same `StubURLProtocol`; filtering rules and pagination window transitions once those land. |
 | **Integration** | mountebank on `localhost:2727`. | `WeChatMomentsTests/Integration/HttpServiceIntegrationTests.swift` — the endpoints answer, the served feed is still 22 elements, and the catch-all really does return 404. |
 
 *The split is expressed by folder and by class name, with each integration test opening `try XCTSkipUnless(Mountebank.isReachable)` — `FAD-TEST-a`, resolved in `nfr §4.8`. With mountebank stopped the whole suite passes and those tests report as skipped; no `-only-testing` selector is required to get a green offline run, though `-only-testing:WeChatMomentsTests/HttpServiceIntegrationTests` selects them when the mock is up.*
@@ -375,7 +407,7 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 - **One type per file**, and the file is named for that type. *`Model/MyModels.swift` held four types under a name that described none of them; it was split into `Models/{Tweet,User,Comment,Img}.swift` in commit 01 alongside the expansion for `FR-API-003`.*
 - **Role suffixes:** `…View`, `…ViewModel`, `…Service`, `…Loader`, `…Helper`. Protocols describing a capability are named for the capability (`BaseService`, `ImageLoading`).
-- **Folders are plural** when they hold a collection of peers: `Models/`, `Services/`, `Extensions/`, `Mocks/`. ⛔ *`Extension/` is still singular, inconsistently with `Utils/`. `Service/` was pluralised in commit 02, which edited every file in it.*
+- **Folders are plural** when they hold a collection of peers: `Models/`, `Services/`, `Extensions/`, `Mocks/`. ⛔ *`Extension/` is still singular. `Service/` was pluralised in commit 02, which edited every file in it; `Utils/` was removed entirely in commit 03 when its only occupant, `ImageHelper.swift`, was deleted.*
 - **Singular/plural consistency within a feature.** ⛔ *`MomentView` (singular) pairs with `MomentsViewModel` (plural). The screen shows moments; both should be plural.*
 - **Extensions** are named `Type+Purpose.swift`, not after the type alone. ⛔ *`Extension/Color.swift` should be `Color+Moments.swift`.*
 - **Swift casing throughout.** `lowerCamelCase` for properties and constants (§9), `UpperCamelCase` for types.
@@ -400,7 +432,7 @@ Recorded rather than guessed. None of these blocks establishing the structure ab
 2. **`FAD-ARCH-b` — no shared Xcode scheme.** ⚠️ The only scheme lives in `WeChatMoments.xcodeproj/xcuserdata/`, so it is not in git and `xcodebuild -scheme WeChatMoments` works **only on the original author's machine**. Every build and test command in `CLAUDE.md` and in this spec depends on it. Moving it to `xcshareddata/xcschemes/` and committing it is a small change with outsized value for a reviewer cloning the repo, and it is a prerequisite for the test-plan option in `FAD-TEST-a`. *Deliberately deferred.*
 3. **`FAD-ARCH-c` — withdrawn 2026-07-27.** This entry claimed the UI-test target's `PRODUCT_BUNDLE_IDENTIFIER` duplicated the unit-test bundle's. **It was wrong.** The identifiers are `com.gl.WeChatMomentsTests` and `com.gl.WeChatMomentsUITests` respectively and always were. The claim entered this document unverified; it is retained here as a withdrawal rather than deleted, per the deprecate-in-place rule in [`README.md §4`](./README.md).
 4. **`FAD-ARCH-d` — composition root.** The target layout (§2.2) introduces `App/RootView.swift` to construct the view model and its services. Whether this is worth a file for a single screen, versus constructing in `WeChatMomentsApp`, is open. It becomes clearly worthwhile the moment §5.2's injection fix lands, because something has to supply the dependencies.
-5. **`FAD-PERF-a` — concurrency mechanism** (§8.3). Owned by `non-functional-requirements.md §1.9`; restated here because it shapes `Services/ImageLoader.swift`.
+5. **`FAD-PERF-a` — concurrency mechanism** (§8.3). **Resolved 2026-07-27 ✅** — **GCD**, as the brief asks by name. Owned by `non-functional-requirements.md §1.10`, which records that an `async/await` implementation was built first and reverted, and what that cost. `FAD-PERF-b` and `FAD-PERF-c` were ratified alongside it (§1.11, §1.12).
 6. **`FAD-DATA-b` — the `BaseService` failure type** (§5.2). **Resolved 2026-07-27 ✅** — `Services/NetworkError.swift`, carried end-to-end. Owned by `non-functional-requirements.md §2.12`; the protocol signature in §5.1 is updated accordingly.
 7. **`FAD-TEST-a` — the unit/integration split** (§10.1). **Resolved 2026-07-27 ✅** — folder plus class-name convention plus an `XCTSkipUnless` reachability guard. Owned by `non-functional-requirements.md §4.8`. Note that it was resolved *without* resolving `FAD-ARCH-b`, which the test-plan alternative would have required.
 

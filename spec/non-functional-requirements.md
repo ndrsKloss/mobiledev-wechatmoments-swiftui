@@ -35,12 +35,12 @@ The feed **MUST** scroll smoothly while dozens of remote images load. The brief 
 | ID | Level | Requirement |
 |----|-------|-------------|
 | `NFR-PERF-001` | MUST | Network requests and JSON decoding **MUST NOT** execute on the main thread. |
-| `NFR-PERF-002` | MUST | Image loading **MUST** be asynchronous. A synchronous, blocking image API **MUST NOT** exist in the codebase. ⛔ *Not met — `ImageHelper` exposes a synchronous `getImage(_:forSize:) -> UIImage?` that unconditionally returns `nil`, and its closure overload downloads via `Data(contentsOf:)` on the caller's thread — i.e. the main thread when called from a SwiftUI `.onAppear`.* |
-| `NFR-PERF-003` | MUST | Loaded images **MUST** be cached in memory and served from cache on subsequent requests for the same URL. ⛔ *Not met — no cache exists.* |
-| `NFR-PERF-004` | MUST | All published UI state changes **MUST** be delivered on the main thread. *(Currently satisfied for network results via `.receive(on: RunLoop.main)`; the image path has no such guarantee because it has no thread hop at all.)* |
-| `NFR-PERF-005` | MUST | The image API **MUST** deliver a result on **every** path — success, failure, and invalid URL. ⛔ *Not met — `ImageHelper.getImage(_:forSize:success:)` invokes its callback only on success; a failed download leaves the caller waiting forever.* |
-| `NFR-PERF-006` | SHOULD | An in-flight image request for a cell that has scrolled off screen **SHOULD** be cancellable, and duplicate concurrent requests for the same URL **SHOULD** be coalesced. |
-| `NFR-PERF-007` | SHOULD | Images **SHOULD** be downsampled to their display size before being held in memory. `ImageHelper` already accepts a `forSize:` parameter for this purpose and currently ignores it. |
+| `NFR-PERF-002` | MUST | Image loading **MUST** be asynchronous. A synchronous, blocking image API **MUST NOT** exist in the codebase. *`ImageHelper` was deleted in commit 03 and replaced by `Services/ImageLoader.swift`, whose only entry point takes a completion handler and returns immediately. No `Data(contentsOf:)` call for a remote URL remains.* |
+| `NFR-PERF-003` | MUST | Loaded images **MUST** be cached in memory and served from cache on subsequent requests for the same URL. *`ImageLoader` consults an `NSCache` before the network, keyed by URL **and** pixel size (§1.11). Pinned offline by `ImageLoaderTests`.* |
+| `NFR-PERF-004` | MUST | All published UI state changes **MUST** be delivered on the main thread. *(Satisfied for network results via `.receive(on: RunLoop.main)`; for images, `ImageLoader` delivers every completion through `DispatchQueue.main.async`. The one exception is deliberate: a cache hit answers synchronously on the calling — main — thread, because hopping a runloop turn for an image already in memory would flash the placeholder on every scroll-back.)* |
+| `NFR-PERF-005` | MUST | The image API **MUST** deliver a result on **every** path — success, failure, and invalid URL. *`ImageLoader.loadImage(from:targetSize:displayScale:completion:)` invokes its completion with `nil` on absent URL, transport failure, non-2xx status and undecodable bytes. This is the exact defect `ImageHelper` carried — a callback inside the `if let`. Four of the `ImageLoaderTests` exist for this one requirement.* |
+| `NFR-PERF-006` | SHOULD | An in-flight image request for a cell that has scrolled off screen **SHOULD** be cancellable, and duplicate concurrent requests for the same URL **SHOULD** be coalesced. *Both met: `ImageLoader` refcounts subscribers per URL, so concurrent requests share one `URLSessionDataTask` and it is cancelled only when the last subscriber leaves. `RemoteImage` holds the token in `@State` and calls `cancel(_:)` from `.onDisappear`. Three tests cover it, including one asserting that cancelling one sharer still delivers to the other.* |
+| `NFR-PERF-007` | SHOULD | Images **SHOULD** be downsampled to their display size before being held in memory. *Met via ImageIO thumbnails on the decode queue (§1.12). The display scale travels with the request rather than living on the loader, because it is a property of the display, not of the cache.* |
 | `NFR-PERF-008` | MUST | Pagination (`FR-PAGE-002`) reads from the in-memory list and **MUST** be a synchronous, allocation-cheap operation — appending a page **MUST NOT** hit the network. |
 
 ### 1.5 Engineering constraints
@@ -49,7 +49,9 @@ The feed **MUST** scroll smoothly while dozens of remote images load. The brief 
 - Any API that returns an image must either be genuinely asynchronous (callback, publisher, or `async`) or read from a cache that is already populated. A function that starts an async load and immediately returns a local variable is a defect — `TweetView.avatar(_from:)` and `TweetView.fetchImage(_from:)` are both written this way today (`fn-spec §4.4`).
 - Force-unwrapping an image result is forbidden (`NFR-DATA-004`).
 
-### 1.6 The GCD requirement ⚠️
+### 1.6 The GCD requirement
+
+**Decided 2026-07-27 — see §1.10.** The comparison below is retained as the reasoning that was in front of the decision, not as an open question.
 
 The brief asks for GCD explicitly. The codebase already uses **Combine** for its networking layer, and SwiftUI's own image loading idiom is `async/await`. These are not equivalent, and picking one silently would be a decision made by omission.
 
@@ -60,7 +62,7 @@ The brief asks for GCD explicitly. The codebase already uses **Combine** for its
 | Cancellation (`NFR-PERF-006`) | Manual (`DispatchWorkItem`) | Built in (`AnyCancellable`) | Built in (`Task`) |
 | Coalescing duplicate requests | Manual | Manual | Manual |
 
-`NFR-PERF-002` requires *asynchronous*; it does not mandate a mechanism. The choice is `FAD-PERF-a`. Note that a GCD-based image loader and a Combine-based network layer can coexist without contradiction — the two pipelines are independent — so the decision does not force a rewrite of `Services/`.
+`NFR-PERF-002` requires *asynchronous*; it does not mandate a mechanism. That was the point: the choice was `FAD-PERF-a`, settled in §1.10 in favour of GCD, as the brief asks. Note that a GCD image loader and a Combine networking layer coexist without contradiction — the two pipelines are independent — so the decision did not force a rewrite of `Services/`, and did not get one.
 
 ### 1.7 Acceptance criteria
 
@@ -79,10 +81,53 @@ The brief asks for GCD explicitly. The codebase already uses **Combine** for its
 
 ### 1.9 Unresolved decisions (Future Architecture Decisions)
 
-- **`FAD-PERF-a`:** ⚠️ concurrency mechanism for the image pipeline — GCD, Combine, or structured concurrency (§1.6).
-- **`FAD-PERF-b`:** cache implementation and eviction policy — `NSCache`, `URLCache`, or a hand-rolled store; memory-only vs. disk-backed.
-- **`FAD-PERF-c`:** whether downsampling (`NFR-PERF-007`) uses `ImageIO` thumbnail generation or a simpler `UIGraphicsImageRenderer` redraw. `Extension/UIImage.swift` already has a `resize(_:)` helper that may or may not be the right primitive.
-- **Assumption:** the feed is small enough (22 elements, ≤ 9 images each) that a memory-only cache with no eviction is acceptable for the exercise.
+- ~~**`FAD-PERF-a`**~~ — **Resolved 2026-07-27 ✅** — §1.10.
+- ~~**`FAD-PERF-b`**~~ — **Resolved 2026-07-27 ✅** — §1.11.
+- ~~**`FAD-PERF-c`**~~ — **Resolved 2026-07-27 ✅** — §1.12.
+- **Assumption carried:** the feed is small enough (22 elements, ≤ 9 images each) that a memory-only cache with no eviction is acceptable for the exercise.
+
+### 1.10 Resolved: concurrency mechanism for the image pipeline (`FAD-PERF-a`) ✅
+
+Ratified **2026-07-27**. `Services/ImageLoader.swift` is **GCD-backed**: a `final class` with a completion-handler interface, three queues, and no `async` keyword in its production path.
+
+**The brief asks for it by name.** `README.md` → *Tech requirements* says *"Utilise GCD for multi-thread operation"*, in the same scored list as *"Layout using swiftUI"* and the dependency prohibition — and the brief states that *"Production and Technical requirements are weighing equally in the final result."* It is phrased as an instruction, not as one of the two items softened to *"appreciated"*. §1.6 exists so that this could not be settled by omission; it was settled by taking the brief at its word.
+
+**How the concurrency is expressed:**
+
+| Job | Mechanism |
+|-----|-----------|
+| Transport | `URLSession.dataTask`, on `URLSession`'s own queue |
+| Guarding the cache bookkeeping | a **serial** `DispatchQueue` — the lock-free way to make `inFlight` safe |
+| Decoding and downsampling | a **concurrent** `DispatchQueue` at `.userInitiated` |
+| Delivering the result | `DispatchQueue.main.async` (`NFR-PERF-004`) |
+
+The serial state queue also buys an ordering guarantee worth naming: `loadImage` returns its token *before* its own block has run, so a caller can cancel immediately — and because `cancel` is enqueued on the same serial queue, it is guaranteed to run after the registration it cancels.
+
+**An `async/await` version was written first and reverted.** It was shorter — `.task(id:)` in `RemoteImage` collapses start-on-appear, cancel-on-disappear and restart-on-URL-change into one modifier, whereas the GCD form spells all three out as `.onAppear` / `.onDisappear` / `.onChange`. Actor isolation is also a stronger guarantee than a serial queue, because the compiler checks it. Those are the costs of this decision and they are real. They do not outweigh a requirement the brief states in the imperative.
+
+**What the GCD form gains back:** cancellation is now directly testable. `cancel(_:)` is an explicit method with an explicit token, so `test_a_cancelled_request_does_not_call_back` and `test_cancelling_one_of_two_sharers_still_delivers_to_the_other` assert on it head-on. Under structured concurrency the equivalent behaviour was implicit in task cancellation and much harder to pin from a test.
+
+**The networking layer stays Combine.** Three mechanisms across the codebase — Combine for JSON, GCD for images, neither for anything else — is a real inconsistency. The defence is that `ImageLoading` (`arch-spec §8.1`) makes the mechanism an implementation detail of one file, and that the brief names both Combine's absence and GCD's presence as *its* requirements, not ours to reconcile.
+
+**Assumption carried:** cancellation means *this caller stopped caring*, not *deliver nothing to anyone*. A cancelled request receives no callback — that is the point of cancelling — and `NFR-PERF-005`'s "a result on every path" governs requests that are allowed to finish. Requests sharing a download are refcounted so one leaving does not silence the others.
+
+### 1.11 Resolved: cache implementation and eviction (`FAD-PERF-b`) ✅
+
+Ratified **2026-07-27**. `NSCache<NSString, UIImage>`, memory-only, no explicit eviction policy.
+
+**Why.** `NSCache` already evicts under memory pressure and is thread-safe, which is most of what a hand-rolled store would have to reimplement. `URLCache` was the alternative and is rejected because it caches **bytes**: every scroll-back would re-decode and re-downsample, and decoding is the expensive half. Caching the decoded, downsampled `UIImage` is the thing that makes `NFR-PERF-003` worth having.
+
+**The key is URL + pixel size**, not URL alone. The same avatar at 40pt and at 120pt are two legitimately different bitmaps; a URL-only key would serve whichever arrived first and quietly degrade one of them.
+
+**Assumption carried:** disk backing is out of proportion for a 22-element feed with no offline requirement.
+
+### 1.12 Resolved: downsampling primitive (`FAD-PERF-c`) ✅
+
+Ratified **2026-07-27**. `CGImageSourceCreateThumbnailAtIndex` with `kCGImageSourceThumbnailMaxPixelSize`.
+
+**Why.** ImageIO produces the thumbnail without ever decoding the full-size bitmap, which is precisely what `NFR-PERF-007`'s *"before being held in memory"* asks for. A `UIGraphicsImageRenderer` redraw — or the `UIImage.resize(_:)` helper this FAD speculated might serve — decodes first and shrinks after, saving nothing at the moment that matters. `resize(_:)` also force-unwrapped its result, which `NFR-DATA-004` forbids, so reusing it would have imported a crash risk into the commit whose job was removing them. `Extension/UIImage.swift` had no other callers and was deleted.
+
+**Display scale travels with the request** (`loadImage(from:targetSize:displayScale:completion:)`), sourced from `@Environment(\.displayScale)` in `RemoteImage`. Scale is a property of the display the image is bound for, not of the loader; holding it on the loader would also mean reaching for `UIScreen` from a background queue.
 
 ---
 
@@ -110,7 +155,7 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 | `NFR-DATA-001` | MUST | The feed **MUST** be decoded **element by element**. A element that fails to decode **MUST** be skipped, leaving the remaining elements intact. |
 | `NFR-DATA-002` | MUST | Every optional field in the data contract **MUST** be modelled as optional in Swift, and every consumer **MUST** handle its absence. |
 | `NFR-DATA-003` | MUST | HTTP responses **MUST** be status-validated before decoding; a non-2xx status **MUST** produce a typed error. *`HttpService.get(url:)` requires an `HTTPURLResponse` in `200..<300` before returning the body, and fails with `NetworkError.httpStatus(_:)` otherwise (§2.12). Pinned offline by `HttpServiceTests`.* |
-| `NFR-DATA-004` | MUST | A failed or missing image **MUST** render the placeholder asset (`Constants.DEFAULT_EMPTY_IMAGE`). Force-unwrapping an image result is **forbidden**. ⛔ *Not met — `HeaderView.setProfileImage(for:)`, `TweetView.avatar(_from:)`, and `TweetView.fetchImage(_from:)` all force-unwrap `image!` inside their callbacks.* |
+| `NFR-DATA-004` | MUST | A failed or missing image **MUST** render the placeholder asset (`Constants.DEFAULT_EMPTY_IMAGE`). Force-unwrapping an image result is **forbidden**. *`View/RemoteImage.swift` falls back to the placeholder whenever the loader returns `nil`, and the three force-unwrapping call sites were deleted with the helpers that fed them in commit 03.* |
 | `NFR-DATA-005` | MUST | Errors **MUST** be surfaced to the view model as typed values that the view can render (`FR-FEED-004`). ⛔ *Not met — `MomentsViewModel.completionHandler` `print`s the error and discards it.* |
 | `NFR-DATA-006` | SHOULD | Diagnostic logging of dropped elements **SHOULD** be available in DEBUG builds (see `fn-spec §8 Q5`). |
 | `NFR-DATA-007` | MUST | List identity **MUST** be stable and unique. |
@@ -266,7 +311,7 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. *`TweetService` and `UserService` take `init(httpService: BaseService = HttpService())`; `HttpService` already took `init(urlSession:)`. `MomentsViewModel` still constructs both services internally — that is `arch-spec §4.2`'s remaining gap, not this one.* |
+| `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. *`TweetService` and `UserService` take `init(httpService: BaseService = HttpService())`; `HttpService` already took `init(urlSession:)`. `ImageLoader` takes `init(urlSession:)` and reaches the view tree as `any ImageLoading` through `EnvironmentValues.imageLoader`, constructed once in `WeChatMomentsApp` — environment rather than a defaulted constructor argument, which would have built a separate loader per view and destroyed the shared cache. `MomentsViewModel` still constructs both network services internally — that is `arch-spec §4.2`'s remaining gap, not this one.* |
 | `NFR-TEST-002` | MUST | Unit tests **MUST NOT** require a live network or a running mountebank instance. *The full suite passes with mountebank stopped; the three genuine integration tests skip (§4.8).* |
 | `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. |
 | `NFR-TEST-004` | MUST | Tests that genuinely require mountebank **MUST** be identifiable as integration tests — by naming, by target, or by a documented `-only-testing` selector — so that the offline suite can be run alone. |
@@ -345,9 +390,9 @@ Cross-cutting checks for every row: no main-thread stalls while scrolling; no ma
 
 | Ref | Area | Question |
 |-----|------|----------|
-| ⚠️ `FAD-PERF-a` | Concurrency | GCD, Combine, or `async/await` for the image pipeline? The brief says GCD; the codebase says Combine. |
-| `FAD-PERF-b` | Caching | Cache implementation and eviction policy; memory-only or disk-backed. |
-| `FAD-PERF-c` | Images | Downsampling primitive — `ImageIO` thumbnails vs. the existing `UIImage.resize(_:)`. |
+| ~~`FAD-PERF-a`~~ | Concurrency | GCD, Combine, or `async/await` for the image pipeline? The brief says GCD; the codebase says Combine. **Resolved 2026-07-27 ✅** — §1.10, in favour of **GCD**, as the brief asks. |
+| ~~`FAD-PERF-b`~~ | Caching | Cache implementation and eviction policy; memory-only or disk-backed. **Resolved 2026-07-27 ✅** — §1.11. |
+| ~~`FAD-PERF-c`~~ | Images | Downsampling primitive — `ImageIO` thumbnails vs. the existing `UIImage.resize(_:)`. **Resolved 2026-07-27 ✅** — §1.12. |
 | ~~`FAD-DATA-a`~~ | Decoding | Mechanism for per-element lenient decoding. **Resolved 2026-07-27 ✅** — §2.10. |
 | ~~`FAD-DATA-b`~~ | Errors | Replacement error type for `URLError` in `BaseService`, able to express HTTP status. **Resolved 2026-07-27 ✅** — §2.12. |
 | `FAD-DATA-c` | Errors | Visual treatment of the error state. |
