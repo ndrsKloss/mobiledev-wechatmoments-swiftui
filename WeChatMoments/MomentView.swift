@@ -31,8 +31,14 @@ struct MomentView: View {
                 // NFR-DATA-007: Tweet carries its own stable id; \.self would collide
                 // on duplicate content.
                 ForEach(tweets) { tweet in
-                    TweetView(tweet: tweet)
-                    Divider()
+                    // One List row per tweet. The separator has to live *inside* the row: as a
+                    // sibling of TweetView it became a row of its own, and a List row has a
+                    // minimum height, so the hairline reserved ~44pt of empty space under every
+                    // cell. The ad-hoc Divider that stood here had the same problem.
+                    VStack(spacing: 0) {
+                        TweetView(tweet: tweet)
+                        FooterView()   // FR-TWEET-008
+                    }
                 }
                 .listRowSeparator(.hidden)
             }

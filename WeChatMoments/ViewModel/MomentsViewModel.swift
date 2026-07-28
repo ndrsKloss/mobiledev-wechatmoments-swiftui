@@ -31,7 +31,8 @@ class MomentsViewModel: ObservableObject {
             .sink { completion in
                 self.completionHandler(completion, message: "Tweets Loaded")
             } receiveValue: { tweets in
-                self.tweets = tweets.filter{ $0.content != nil }
+                // FR-DATA-001/002/004: filtered once, here, where the feed enters memory.
+                self.tweets = TweetFilter.displayable(tweets)
             }.store(in: &cancellable)
     }
 

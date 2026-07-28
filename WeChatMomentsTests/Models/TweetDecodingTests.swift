@@ -65,7 +65,7 @@ final class TweetDecodingTests: XCTestCase {
     }
 
     /// An *empty* comment array is distinct from an absent one — two elements carry
-    /// `"comments": []`, and the rendering rule in FR-TWEET-008 depends on telling them apart.
+    /// `"comments": []`, and the rendering rule in FR-TWEET-006 depends on telling them apart.
     func test_empty_comment_arrays_decode_as_empty_not_nil() throws {
         let tweets = try decodeLeniently()
 

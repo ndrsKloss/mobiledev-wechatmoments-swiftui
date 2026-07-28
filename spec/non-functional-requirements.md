@@ -46,7 +46,7 @@ The feed **MUST** scroll smoothly while dozens of remote images load. The brief 
 ### 1.5 Engineering constraints
 
 - `Data(contentsOf:)` **MUST NOT** be used for remote URLs anywhere in the codebase. It is synchronous, uncancellable, and has no timeout control.
-- Any API that returns an image must either be genuinely asynchronous (callback, publisher, or `async`) or read from a cache that is already populated. A function that starts an async load and immediately returns a local variable is a defect — `TweetView.avatar(_from:)` and `TweetView.fetchImage(_from:)` are both written this way today (`fn-spec §4.4`).
+- Any API that returns an image must either be genuinely asynchronous (callback, publisher, or `async`) or read from a cache that is already populated. A function that starts an async load and immediately returns a local variable is a defect — `TweetView.avatar(_from:)` and `TweetView.fetchImage(_from:)` were both written this way, and were deleted rather than patched in commit 03 (`fn-spec §4.4`).
 - Force-unwrapping an image result is forbidden (`NFR-DATA-004`).
 
 ### 1.6 The GCD requirement
@@ -267,7 +267,7 @@ The brief requires *"layout on all kinds of iOS device screen and orientation."*
 |----|-------|-------------|
 | `NFR-LAYOUT-001` | MUST | No layout **MUST** depend on a hard-coded screen width or a specific device size. Sizes come from the layout system (`GeometryReader`, `.frame(maxWidth:)`, grid sizing), not from constants. |
 | `NFR-LAYOUT-002` | MUST | Rotation **MUST** reflow the header and the feed without clipping or overlap. ⚠️ *`HeaderView` currently pins its height to a fixed `370` and offsets the avatar/nick by arithmetic against that constant; this survives width changes but is fragile under any height change.* |
-| `NFR-LAYOUT-003` | MUST | The image grid's cell size **MUST** derive from available width (`FR-TWEET-010`), preserving square cells and consistent gutters. ⛔ *Not met — `TweetView` frames cells at `Constants.IMAGE_SIZE * 2` regardless of available width.* |
+| `NFR-LAYOUT-003` | MUST | The image grid's cell size **MUST** derive from available width (`FR-TWEET-010`), preserving square cells and consistent gutters. ⛔ *Not met — there is no grid to size. The code this marker used to cite, `TweetView.addImagesToView(_from:)` framing cells at `Constants.IMAGE_SIZE * 2`, was deleted in commit 03 (`fn-spec §4.4`).* |
 | `NFR-LAYOUT-004` | MUST | Text **MUST** wrap to unlimited lines where the design calls for full content, and truncate deliberately (with a stated mode) only where it does not — the header nick truncates by design. |
 | `NFR-LAYOUT-005` | SHOULD | The layout **SHOULD** tolerate Dynamic Type at least through the default accessibility sizes. Deliberately a `SHOULD`: the exercise does not require it, and hard-coded point sizes in `Config/Constant.swift` currently prevent it. |
 | `NFR-LAYOUT-006` | SHOULD | Safe areas **SHOULD** be respected for interactive and textual content. *`MomentView` currently applies a blanket `.ignoresSafeArea()`, which is intentional for the full-bleed header but pushes content under the status bar.* |
@@ -316,7 +316,7 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 | `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. |
 | `NFR-TEST-004` | MUST | Tests that genuinely require mountebank **MUST** be identifiable as integration tests — by naming, by target, or by a documented `-only-testing` selector — so that the offline suite can be run alone. |
 | `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). |
-| `NFR-TEST-006` | SHOULD | Data transforms — filtering (`FR-DATA-*`), paging windows, grid-column derivation — **SHOULD** be pure functions over their inputs, so they can be tested without any object graph. This is the concrete form the brief's "functional programming is appreciated" takes. |
+| `NFR-TEST-006` | SHOULD | Data transforms — filtering (`FR-DATA-*`), paging windows, grid-column derivation — **SHOULD** be pure functions over their inputs, so they can be tested without any object graph. This is the concrete form the brief's "functional programming is appreciated" takes. *`TweetFilter` is the first of these — a `static` pure transform over `[Tweet]` that the view model calls but does not own, tested by `TweetFilterTests` with no view model instantiated.* |
 | `NFR-TEST-007` | SHOULD | Mocks **SHOULD** live in a single `Mocks/` folder, guarded by `#if DEBUG`, and be shared between SwiftUI previews and tests. |
 | `NFR-TEST-008` | SHOULD | The scenarios in `fn-spec §7` **SHOULD** each have a corresponding automated test where the scenario is observable without a device. |
 

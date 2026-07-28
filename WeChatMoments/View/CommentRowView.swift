@@ -1,5 +1,5 @@
 //
-//  CommentView.swift
+//  CommentRowView.swift
 //  WeChatMoments
 //
 //  Created by Wole Solana on 2/27/24.
@@ -7,57 +7,47 @@
 
 import SwiftUI
 
+/// One line of the comment block: the commenter's nick, tinted, then the comment (FR-TWEET-007).
+///
+/// The nick and the text are a single `Text` rather than two in an `HStack`, so a long comment
+/// wraps as one paragraph and re-flows with the available width (NFR-LAYOUT-001/004). The row
+/// carries no `Button`: fn-spec §6 states the page is static, and a tappable nick was the only
+/// thing on the screen suggesting otherwise.
 struct CommentRowView: View {
     var comment: Comment
+
     var body: some View {
-        HStack{
-            Button {
+        let nick = Text(comment.sender.displayName)
+            .foregroundStyle(.blue)
+        let content = Text(": \(comment.content ?? "")")
+            .foregroundStyle(.black)
 
-            } label: {
-                Text(displayName(for: comment.sender))
-                    .padding(.leading, Constants.SENDER_AVATAR_SIZE.width + 20)
-                    .foregroundColor(.blue)
-                    .font(.system(size: Constants.FONT_SIZE_COMMENT))
-                    .background(Color.commentsBackgroudColor)
-            }
-
-            Text(":\(self.comment.content ?? "")")
-                .font(.system(size: Constants.FONT_SIZE_COMMENT))
-                .background(Color.commentsBackgroudColor)
-                .foregroundColor(.black)
-                .lineLimit(nil)
-                .padding(.trailing, 20)
-        }
-    }
-
-    private func displayName(for sender: User?) -> String {
-        var displayName = sender?.username
-        if let nick = sender?.nick {
-            displayName = nick
-        }
-        return displayName ?? "Unknown"
-    }
-
-    private func getComment(senderName: String, comment: String) -> NSAttributedString {
-        let msg = "\(senderName):\(self.comment.content ?? "")"
-        let range = (msg as NSString).range(of: senderName)
-        let attrString = NSMutableAttributedString(string: msg)
-        attrString.addAttributes([NSAttributedString.Key.foregroundColor: UIColor.blue], range: range)
-
-        return attrString
+        Text("\(nick)\(content)")
+            .font(.system(size: Constants.FONT_SIZE_COMMENT))
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 #Preview {
-    CommentRowView(
-        comment: Comment(
-            content: "Some Comment",
-            sender: User(
-                username: "test user",
-                nick: nil,
-                avatar: nil,
-                profile: nil
+    VStack(alignment: .leading, spacing: Constants.COMMENT_ROW_SPACING) {
+        CommentRowView(
+            comment: Comment(
+                content: "Some Comment",
+                sender: User(username: "test user", nick: nil, avatar: nil, profile: nil)
             )
         )
-    )
+        CommentRowView(
+            comment: Comment(
+                content: "A comment long enough to prove that the nick and the text wrap "
+                    + "together as one paragraph rather than clipping to a single line.",
+                sender: User(username: "lhuang", nick: "Lei Huang", avatar: nil, profile: nil)
+            )
+        )
+        // Both fields absent — FR-API-002 says every user field is optional.
+        CommentRowView(comment: Comment(content: nil, sender: nil))
+    }
+    .padding()
+    .background(Color.commentsBackgroudColor)
 }

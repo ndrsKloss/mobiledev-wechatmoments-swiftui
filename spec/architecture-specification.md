@@ -73,12 +73,14 @@ WeChatMoments/
 │   └── FailableDecodable.swift # per-element decoding wrapper (NFR-DATA-001)
 ├── View/
 │   ├── HeaderView.swift        # profile banner + avatar + nick
-│   ├── TweetView.swift         # tweet cell (sender/grid still placeholders)
+│   ├── TweetView.swift         # tweet cell (image grid still to be written)
 │   ├── RemoteImage.swift       # async image view owning its @State image + token (§8.4)
-│   ├── CommentRowView.swift    # not wired in
-│   └── FooterView.swift        # not wired in
+│   ├── CommentBlockView.swift  # hides itself when comments are absent or empty (FR-TWEET-006)
+│   ├── CommentRowView.swift    # one comment line
+│   └── FooterView.swift        # the hairline between cells (FR-TWEET-008)
 ├── ViewModel/
-│   └── MomentsViewModel.swift
+│   ├── MomentsViewModel.swift
+│   └── TweetFilter.swift       # pure display filter (FR-DATA-001/002, NFR-TEST-006)
 ├── Services/
 │   ├── HttpService.swift       # BaseService protocol + HttpService
 │   ├── NetworkError.swift      # the single failure type (FAD-DATA-b)
@@ -93,6 +95,7 @@ WeChatMoments/
 │   └── UrlConstant.swift       # enum UrlConstant
 ├── Extension/                  # ⚠️ singular
 │   ├── Color.swift · String.swift
+│   ├── User+DisplayName.swift  # the sender-name fallback (FR-TWEET-001/007)
 │   └── EnvironmentValues+ImageLoader.swift   # the ImageLoading injection point
 ├── Assets.xcassets/
 └── Preview Content/
@@ -111,9 +114,11 @@ WeChatMoments/
 │       ├── MomentsViewModel.swift
 │       ├── HeaderView.swift
 │       ├── TweetView.swift
+│       ├── CommentBlockView.swift
 │       ├── CommentRowView.swift
 │       ├── FooterView.swift
 │       └── Support/
+│           ├── TweetFilter.swift       # pure display filter (NFR-TEST-006)
 │           └── ImageGridLayout.swift   # pure grid-column derivation (NFR-TEST-006)
 ├── View/
 │   └── RemoteImage.swift       # feature-agnostic: any URL, any size (§8.4)

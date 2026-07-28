@@ -27,9 +27,9 @@ The whole product is therefore: **fetch two endpoints, render a header and a pag
 | # | Region | Contents | Rendered today by | Status |
 |---|--------|----------|-------------------|--------|
 | 1 | **Profile header** | Full-bleed profile (cover) image; the user's nick and avatar overlaid near its bottom edge. | `View/HeaderView.swift` | Present; profile image never loads (§3.1) |
-| 2 | **Tweet cell** | Sender avatar (leading), sender nick, optional text content, optional image grid, optional comment block. | `View/TweetView.swift` | Placeholders only — sender nick is the literal string `"Placeholder Profile"`, avatar receives `nil`, grid receives `[]` |
-| 3 | **Comment block** | Zero or more comment rows, each *"<sender nick>: <content>"*. Hidden entirely when there are no comments. | `View/CommentRowView.swift` | Exists, **not wired in** |
-| 4 | **Cell separator** | A hairline rule between tweets. | `View/FooterView.swift` | Exists, **not wired in**; `MomentView` uses a plain `Divider()` instead |
+| 2 | **Tweet cell** | Sender avatar (leading), sender nick, optional text content, optional image grid, optional comment block. | `View/TweetView.swift` | Sender, content and comments render from the payload; the image grid is still absent (§4.4) |
+| 3 | **Comment block** | Zero or more comment rows, each *"<sender nick>: <content>"*. Hidden entirely when there are no comments. | `View/CommentBlockView.swift` + `View/CommentRowView.swift` | Wired in; the block owns the hide-when-empty rule, the row draws one line |
+| 4 | **Cell separator** | A hairline rule between tweets. | `View/FooterView.swift` | Wired in, inside the tweet's list row |
 | 5 | **Loading indicator** | A circular progress indicator while the initial fetch is in flight. | `MomentView.swift` (`.overlay`) | Present; toggle logic is unbalanced (`arch-spec §4.2`) |
 
 The header scrolls with the feed — it is the first row of the list, not a pinned chrome element. `[C]` (`MomentView` places `HeaderView` inside the `List`.)
@@ -152,23 +152,23 @@ The brief's three pagination sentences, made precise. **Page size is 5.**
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `FR-TWEET-001` | MUST | Every displayed tweet **MUST** show its sender's nick and avatar. ⛔ *Not met — `TweetView` hard-codes `Text("Placeholder Profile")` and calls `avatar(_from: nil)`.* |
-| `FR-TWEET-002` | MUST | Text content is **optional**. When absent, no empty text row is rendered. ⛔ *Not met — `TweetView` renders `Text(tweet.content ?? "")` unconditionally.* |
-| `FR-TWEET-003` | MUST | Content text **MUST** wrap to as many lines as it needs; it **MUST NOT** be truncated. |
-| `FR-TWEET-004` | MUST | Images are **optional**, and when present number **1 to 9**. The grid **MUST** render exactly as many cells as there are images — no placeholder padding cells. ⛔ *Not met — `TweetView.addImagesToView(_from:)` renders a fixed `0..<imageLimit` (5) range, padding short sets with the empty-image asset and truncating sets larger than 5.* |
+| `FR-TWEET-001` | MUST | Every displayed tweet **MUST** show its sender's nick and avatar. *`TweetView` reads `tweet.sender.avatar` through `RemoteImage` and `tweet.sender.displayName`. Every field of the payload's user is optional (`FR-API-002`), so the nick falls back to the username and then to "Unknown" — `Extension/User+DisplayName.swift`, shared with `FR-TWEET-007`.* |
+| `FR-TWEET-002` | MUST | Text content is **optional**. When absent, no empty text row is rendered. *`TweetView` wraps the content `Text` in `if let content = tweet.content, !content.isEmpty`.* |
+| `FR-TWEET-003` | MUST | Content text **MUST** wrap to as many lines as it needs; it **MUST NOT** be truncated. *`.lineLimit(nil)` plus `.fixedSize(horizontal: false, vertical: true)`; the latter is what stops the enclosing `List` row from collapsing it to one line.* |
+| `FR-TWEET-004` | MUST | Images are **optional**, and when present number **1 to 9**. The grid **MUST** render exactly as many cells as there are images — no placeholder padding cells. ⛔ *Not met — there is no grid. `TweetView.addImagesToView(_from:)` was deleted in commit 03 rather than patched (see the note below), and its replacement has yet to be written; an image-only tweet currently renders as sender and separator alone.* |
 | `FR-TWEET-005` | MUST | The image grid layout **MUST** follow §5. |
-| `FR-TWEET-006` | MUST | Comments are **optional**. An absent *or empty* `comments` array **MUST** render no comment block at all — no header, no spacing. |
-| `FR-TWEET-007` | MUST | Each comment row **MUST** show the commenter's nick followed by the comment text, visually distinguished (the nick tinted, per the reference screenshots `[I]`). The comment block sits on its own background fill (`Extension/Color.swift`). |
-| `FR-TWEET-008` | SHOULD | A tweet cell **SHOULD** be visually separated from the next by a hairline rule. `View/FooterView.swift` exists for this purpose and **SHOULD** be used in place of the ad-hoc `Divider()` currently in `MomentView`. |
+| `FR-TWEET-006` | MUST | Comments are **optional**. An absent *or empty* `comments` array **MUST** render no comment block at all — no header, no spacing. *`View/CommentBlockView.swift` owns the rule: it emits nothing unless `comments` is non-nil and non-empty, so neither stack spacing nor the background fill survives an empty array.* |
+| `FR-TWEET-007` | MUST | Each comment row **MUST** show the commenter's nick followed by the comment text, visually distinguished (the nick tinted, per the reference screenshots `[I]`). The comment block sits on its own background fill (`Extension/Color.swift`). *One interpolated `Text` per row, so nick and comment wrap as a single paragraph; the fill is applied once, behind the block, rather than per `Text`.* |
+| `FR-TWEET-008` | SHOULD | A tweet cell **SHOULD** be visually separated from the next by a hairline rule. `View/FooterView.swift` exists for this purpose and **SHOULD** be used in place of the ad-hoc `Divider()` currently in `MomentView`. *Met — `FooterView` sits inside each tweet's list row. As a sibling row of its own it would have taken the `List`'s minimum row height, reserving empty space under every cell; the `Divider()` it replaced had the same defect.* |
 
-**A structural note on `TweetView`'s image helpers — resolved in commit 03, recorded here as history.** `avatar(_from:)` and `fetchImage(_from:)` both called the *asynchronous* closure overload of `ImageHelper.getImage` and then immediately `return`ed a local variable the callback had not yet written, so they could only ever return the placeholder / `nil`. Separately, `addImagesToView(_from:)` ended in `.padding() as? AnyView`, a cast that always yielded `nil` because `padding()` returns a `ModifiedContent`, not an `AnyView` — so the grid never drew anything at all. All three were deleted rather than patched (`arch-spec §8`). The avatar slot is now a `RemoteImage`; the ⛔ markers above stay because it is still fed `nil` rather than `tweet.sender.avatar`, and the grid has yet to be written.
+**A structural note on `TweetView`'s image helpers — resolved in commit 03, recorded here as history.** `avatar(_from:)` and `fetchImage(_from:)` both called the *asynchronous* closure overload of `ImageHelper.getImage` and then immediately `return`ed a local variable the callback had not yet written, so they could only ever return the placeholder / `nil`. Separately, `addImagesToView(_from:)` ended in `.padding() as? AnyView`, a cast that always yielded `nil` because `padding()` returns a `ModifiedContent`, not an `AnyView` — so the grid never drew anything at all. All three were deleted rather than patched (`arch-spec §8`). The avatar slot is now a `RemoteImage` fed `tweet.sender.avatar`; only `FR-TWEET-004`'s ⛔ remains, because the grid has yet to be written.
 
 ### 4.5 Data filtering (`FR-DATA`)
 
 | ID | Level | Requirement |
 |----|-------|-------------|
 | `FR-DATA-001` | MUST | A tweet with **neither** content **nor** images **MUST NOT** be displayed. (2 elements in the served feed are `sender`-only.) |
-| `FR-DATA-002` | MUST | A tweet with images but **no** content **MUST** be displayed. ⛔ *Not met — `MomentsViewModel.loadTweets()` filters on `$0.content != nil`, which discards all 4 image-only tweets. `FR-DATA-001` is the correct, narrower rule; the current filter is a proxy for it that removes legitimate content.* |
+| `FR-DATA-002` | MUST | A tweet with images but **no** content **MUST** be displayed. *`MomentsViewModel.loadTweets()` applies `TweetFilter.displayable(_:)`, which drops a tweet only when it has neither content nor images. It replaced `$0.content != nil` — a narrower proxy for `FR-DATA-001` that silently discarded all 4 image-only tweets. Pinned by `TweetFilterTests`.* |
 | `FR-DATA-003` | MUST | Malformed elements (§3.3) **MUST** be dropped silently and **MUST NOT** be counted toward a page. |
 | `FR-DATA-004` | SHOULD | Filtering **SHOULD** happen once, at the boundary where the feed enters memory, so that pagination indices refer only to displayable tweets. |
 
