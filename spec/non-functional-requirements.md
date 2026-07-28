@@ -60,7 +60,7 @@ The brief asks for GCD explicitly. The codebase already uses **Combine** for its
 | Cancellation (`NFR-PERF-006`) | Manual (`DispatchWorkItem`) | Built in (`AnyCancellable`) | Built in (`Task`) |
 | Coalescing duplicate requests | Manual | Manual | Manual |
 
-`NFR-PERF-002` requires *asynchronous*; it does not mandate a mechanism. The choice is `FAD-PERF-a`. Note that a GCD-based image loader and a Combine-based network layer can coexist without contradiction — the two pipelines are independent — so the decision does not force a rewrite of `Service/`.
+`NFR-PERF-002` requires *asynchronous*; it does not mandate a mechanism. The choice is `FAD-PERF-a`. Note that a GCD-based image loader and a Combine-based network layer can coexist without contradiction — the two pipelines are independent — so the decision does not force a rewrite of `Services/`.
 
 ### 1.7 Acceptance criteria
 
@@ -109,7 +109,7 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 |----|-------|-------------|
 | `NFR-DATA-001` | MUST | The feed **MUST** be decoded **element by element**. A element that fails to decode **MUST** be skipped, leaving the remaining elements intact. |
 | `NFR-DATA-002` | MUST | Every optional field in the data contract **MUST** be modelled as optional in Swift, and every consumer **MUST** handle its absence. |
-| `NFR-DATA-003` | MUST | HTTP responses **MUST** be status-validated before decoding; a non-2xx status **MUST** produce a typed error. ⛔ *Not met — `HttpService.get(url:)` does `.map(\.data)`, discarding the `HTTPURLResponse` entirely, so the catch-all stub's 404 JSON body is handed to the decoder as if it were success data (`FR-API-005`).* |
+| `NFR-DATA-003` | MUST | HTTP responses **MUST** be status-validated before decoding; a non-2xx status **MUST** produce a typed error. *`HttpService.get(url:)` requires an `HTTPURLResponse` in `200..<300` before returning the body, and fails with `NetworkError.httpStatus(_:)` otherwise (§2.12). Pinned offline by `HttpServiceTests`.* |
 | `NFR-DATA-004` | MUST | A failed or missing image **MUST** render the placeholder asset (`Constants.DEFAULT_EMPTY_IMAGE`). Force-unwrapping an image result is **forbidden**. ⛔ *Not met — `HeaderView.setProfileImage(for:)`, `TweetView.avatar(_from:)`, and `TweetView.fetchImage(_from:)` all force-unwrap `image!` inside their callbacks.* |
 | `NFR-DATA-005` | MUST | Errors **MUST** be surfaced to the view model as typed values that the view can render (`FR-FEED-004`). ⛔ *Not met — `MomentsViewModel.completionHandler` `print`s the error and discards it.* |
 | `NFR-DATA-006` | SHOULD | Diagnostic logging of dropped elements **SHOULD** be available in DEBUG builds (see `fn-spec §8 Q5`). |
@@ -119,7 +119,7 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 
 - Per-element decoding is implemented with a `Decodable` wrapper that attempts the real type inside a `try?` and stores `nil` on failure, applied as `[FailableDecodable<Tweet>]` — ratified as `FAD-DATA-a` (§2.10). Only the behaviour of `NFR-DATA-001` is mandated; the mechanism is a decision, not a requirement.
 - Status validation belongs in `HttpService`, the single `URLSession` boundary (`arch-spec §5`), not duplicated into each feature service.
-- The `URLError` failure type in `BaseService.get(url:)` is too narrow to express "HTTP 404"; widening it is part of satisfying `NFR-DATA-003` (`FAD-DATA-b`).
+- The `URLError` failure type in `BaseService.get(url:)` was too narrow to express "HTTP 404"; widening it was part of satisfying `NFR-DATA-003` — ratified as `FAD-DATA-b` (§2.12).
 
 ### 2.6 Relationship to the functional specification
 
@@ -141,7 +141,7 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 ### 2.9 Unresolved decisions (Future Architecture Decisions)
 
 - **`FAD-DATA-a`:** **Resolved 2026-07-27 ✅** — see §2.10.
-- **`FAD-DATA-b`:** the error type flowing through `BaseService`. `URLError` cannot express an HTTP status; a project error enum is the obvious replacement but changes the protocol signature (`arch-spec §5`).
+- **`FAD-DATA-b`:** **Resolved 2026-07-27 ✅** — see §2.12.
 - **`FAD-DATA-c`:** the visual treatment of the error state — inline row, full-screen replacement, or a retry banner. Currently unspecified anywhere.
 - **`FAD-DATA-d`:** **Resolved 2026-07-27 ✅** — see §2.11.
 - **Assumption:** no retry policy is required for this exercise; a failed request stays failed until the user refreshes.
@@ -171,6 +171,31 @@ Ratified **2026-07-27**.
 **Assumption carried:** identity is per-decode, not per-tweet-in-the-world. Re-fetching the feed mints new ids. That is correct for `FR-PAGE-004` as currently read (refresh resets the window without re-fetching, `fn-spec §8 Q2`) and would need revisiting only if refresh becomes a re-fetch.
 
 **Verified:** `TweetDecodingTests.test_identity_is_unique_across_identical_content`.
+
+### 2.12 Resolved: the `BaseService` failure type (`FAD-DATA-b`) ✅
+
+Ratified **2026-07-27**.
+
+`Services/NetworkError.swift` replaces `URLError` as the failure type of `BaseService.get(url:)`, and is carried **end-to-end**: `TweetService` and `UserService` publish `AnyPublisher<[Tweet], NetworkError>` and `AnyPublisher<User, NetworkError>` rather than widening back to `any Error`.
+
+```swift
+enum NetworkError: Error {
+    case transport(URLError)   // no response at all
+    case invalidResponse       // not an HTTPURLResponse
+    case httpStatus(Int)       // a response, but non-2xx (FR-API-005)
+    case decoding(Error)       // a 2xx body the model could not read
+}
+```
+
+**Why four cases and not one.** The distinctions are the ones a caller acts on differently. "The server is unreachable" is a retry-or-tell-the-user situation; "the server said 404" is a permanent answer about that URL; "the body did not parse" is a client-side contract break. Collapsing them into a single `.failure` would rebuild the exact ambiguity this decision exists to remove — the old code could not tell a 404 from a valid response, which is how `UserServiceTests.test_wrong_url` came to pass by decoding the 404 error body into an all-`nil` `User`.
+
+**Why end-to-end rather than at the seam only.** Keeping `AnyPublisher<[Tweet], Error>` on the feature services would have been a smaller diff, but the view model is the consumer that has to render an error state (`NFR-DATA-005`, `FR-FEED-004`), and it sits at the far end. A typed failure that is widened one hop before its consumer buys nothing. The cost is one `.mapError` per service, which also names the only failure the decoder can produce.
+
+**`Equatable` is deliberately not conformed.** `.transport` and `.decoding` carry payloads that are not `Equatable`, and synthesising equality would mean either dropping those payloads or hand-writing a comparison whose only client is a test assertion. Tests match on the case instead, via the small `XCTAssertHttpStatus` / `XCTAssertIsDecodingFailure` / `XCTAssertIsTransportFailure` helpers in `WeChatMomentsTests/Support/`.
+
+**Assumption carried:** `.httpStatus` discards the response body. The catch-all stub returns `{"error": "User not found"}` alongside its 404, and nothing in the app displays it. If an error state ever needs to show a server-supplied message, this is the case that gains an associated value.
+
+**Verified:** `HttpServiceTests` asserts 200 → data, 404/500/304 → `.httpStatus` with the right code, and a `URLError` → `.transport`, all against a stubbed `URLProtocol` with no network. `TweetServiceTests` and `UserServiceTests` assert the same errors survive the decode stage without being reclassified.
 
 ---
 
@@ -241,8 +266,8 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. ⛔ *Not met — `TweetService.init()` and `UserService.init()` both construct `HttpService()` internally. The `BaseService` protocol exists and the property is typed against it, but nothing can supply a different implementation, so the seam is decorative.* |
-| `NFR-TEST-002` | MUST | Unit tests **MUST NOT** require a live network or a running mountebank instance. ⛔ *Not met — all three service test classes (`HttpServiceTests`, `TweetServiceTests`, `UserServiceTests`) hit `localhost:2727`, so `xcodebuild test` fails outright without the mock server.* |
+| `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. *`TweetService` and `UserService` take `init(httpService: BaseService = HttpService())`; `HttpService` already took `init(urlSession:)`. `MomentsViewModel` still constructs both services internally — that is `arch-spec §4.2`'s remaining gap, not this one.* |
+| `NFR-TEST-002` | MUST | Unit tests **MUST NOT** require a live network or a running mountebank instance. *The full suite passes with mountebank stopped; the three genuine integration tests skip (§4.8).* |
 | `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. |
 | `NFR-TEST-004` | MUST | Tests that genuinely require mountebank **MUST** be identifiable as integration tests — by naming, by target, or by a documented `-only-testing` selector — so that the offline suite can be run alone. |
 | `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). |
@@ -252,9 +277,9 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 
 ### 4.4 Engineering constraints
 
-- Constructor injection with a **default argument** (`init(httpService: BaseService = HttpService())`) satisfies `NFR-TEST-001` with no change to any call site — this is the minimal fix for the current gap.
-- `WeChatMomentsTests/Config/TestDataConfig.swift` already holds inline JSON dictionaries (including one keyed `profile-image`) that are largely unused. Either it becomes the mock's data source or it is deleted; leaving dead fixtures alongside live ones is worse than either.
-- `WeChatMomentsTests/WeChatMomentsTests.swift` and `WeChatMomentsUITests/WeChatMomentsUITests.swift` are unmodified Xcode template stubs with empty test bodies. They assert nothing and **SHOULD** be replaced or removed.
+- Constructor injection with a **default argument** (`init(httpService: BaseService = HttpService())`) satisfies `NFR-TEST-001` with no change to any call site. *Applied in commit 02.*
+- `WeChatMomentsTests/Config/TestDataConfig.swift` still holds inline JSON dictionaries (including one keyed `profile-image`) that are largely unused — only its `USER` and `URL_HOST` constants are read. Either it becomes the mock's data source or it is deleted; leaving dead fixtures alongside live ones is worse than either (`FAD-TEST-c`).
+- `WeChatMomentsUITests/WeChatMomentsUITests.swift` is an unmodified Xcode template stub with empty test bodies. It asserts nothing and **SHOULD** be replaced or removed. *Its unit-target counterpart was deleted in commit 02.*
 
 ### 4.5 Acceptance criteria
 
@@ -266,13 +291,35 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 ### 4.6 Testing and validation considerations
 
 - Run the offline suite with the network disabled entirely, not merely with mountebank stopped — a test that quietly depends on the remote image host will pass locally and fail in CI.
-- The current `test_wrong_url` tests assert against the catch-all 404 stub; once `NFR-DATA-003` lands, they become genuine status-validation tests and should move to the mocked suite.
+- The old `test_wrong_url` tests asserted against the catch-all 404 stub. With `NFR-DATA-003` landed they became genuine status-validation tests and moved to the mocked suite; one live-404 check remains in `HttpServiceIntegrationTests`, which is the only place the 404 is real rather than scripted.
 
 ### 4.7 Unresolved decisions (Future Architecture Decisions)
 
-- **`FAD-TEST-a`:** how integration tests are separated — a fourth target, a naming convention plus a documented `-only-testing` invocation, or a test plan. A test plan is the cleanest but requires a shared scheme, which does not currently exist (`arch-spec §13`).
+- **`FAD-TEST-a`:** **Resolved 2026-07-27 ✅** — see §4.8.
 - **`FAD-TEST-b`:** whether to adopt Swift Testing (`@Test`/`#expect`) or stay on XCTest. The project is on XCTest; the deployment target (iOS 17.2) permits either.
 - **`FAD-TEST-c`:** the fate of `TestDataConfig.swift` — promote to the canonical mock fixture, or delete in favour of `Tweets.json`.
+
+### 4.8 Resolved: separating the integration tests (`FAD-TEST-a`) ✅
+
+Ratified **2026-07-27**.
+
+Integration tests are identified **by folder and by class name** — `WeChatMomentsTests/Integration/HttpServiceIntegrationTests.swift` — and each opens with:
+
+```swift
+try XCTSkipUnless(Mountebank.isReachable, "mountebank is not running on \(TestDataConfig.URL_HOST).")
+```
+
+With mountebank stopped the default `xcodebuild test` invocation reports **0 failures and 3 skips**. With it running, all three execute. No `-only-testing` selector is needed for the offline run, though `-only-testing:WeChatMomentsTests/HttpServiceIntegrationTests` selects the integration set when the mock is up.
+
+**Why this and not a test plan.** A test plan is the cleaner expression and would make the split declarative rather than conventional. It requires a shared scheme, which the project does not have — `FAD-ARCH-b`, deliberately deferred. Resolving `FAD-TEST-a` this way keeps the two decisions independent: if `FAD-ARCH-b` is later taken up, converting these tests to a plan is a mechanical change and the folder is already the right shape for it.
+
+**Why not a fourth target.** Strongest isolation, but creating a target is a large hand-edit to `project.pbxproj` — precisely the class of risk `FAD-ARCH-a` (`arch-spec §2.5`) was resolved to eliminate. Disproportionate for three tests.
+
+**The cost, stated plainly.** A skip is quieter than a failure. If mountebank is down, three tests silently do not run, and a reader skimming "TEST SUCCEEDED" learns less than they would from a red build. That is the deliberate trade: `NFR-TEST-002` says the offline suite must pass, and a test that fails because a server is missing is exactly what that requirement forbids. The mitigation is that the skip is reported per-test with its reason, and that everything these tests would catch about *our* code is already covered offline — what they add is confirmation that `imposters.ejs` still serves what the app expects.
+
+**Assumption carried:** the reachability probe is a 2-second `URLSession` request to `localhost:2727`. On loopback a refused connection returns immediately, so the probe is effectively free when the server is down. A *hung* mountebank — accepting connections but never answering — would cost 2 seconds per test rather than being reported as a failure.
+
+**Verified:** the full suite, mountebank stopped — 28 passed, 0 failed, 3 skipped. The same suite with mountebank running — 31 passed, 0 skipped.
 
 ---
 
@@ -302,12 +349,12 @@ Cross-cutting checks for every row: no main-thread stalls while scrolling; no ma
 | `FAD-PERF-b` | Caching | Cache implementation and eviction policy; memory-only or disk-backed. |
 | `FAD-PERF-c` | Images | Downsampling primitive — `ImageIO` thumbnails vs. the existing `UIImage.resize(_:)`. |
 | ~~`FAD-DATA-a`~~ | Decoding | Mechanism for per-element lenient decoding. **Resolved 2026-07-27 ✅** — §2.10. |
-| ⚠️ `FAD-DATA-b` | Errors | Replacement error type for `URLError` in `BaseService`, able to express HTTP status. |
+| ~~`FAD-DATA-b`~~ | Errors | Replacement error type for `URLError` in `BaseService`, able to express HTTP status. **Resolved 2026-07-27 ✅** — §2.12. |
 | `FAD-DATA-c` | Errors | Visual treatment of the error state. |
 | ~~`FAD-DATA-d`~~ | Identity | Stable identity for `Tweet` — the payload carries no id. **Resolved 2026-07-27 ✅** — §2.11. |
 | `FAD-LAYOUT-a` | Layout | Whether `HeaderView`'s fixed 370pt height becomes proportional. |
 | `FAD-LAYOUT-b` | Layout | Whether Dynamic Type is pursued at all. |
-| `FAD-TEST-a` | Testing | How integration tests are separated from the offline suite. |
+| ~~`FAD-TEST-a`~~ | Testing | How integration tests are separated from the offline suite. **Resolved 2026-07-27 ✅** — §4.8. |
 | `FAD-TEST-b` | Testing | Swift Testing vs. XCTest. |
 | `FAD-TEST-c` | Testing | Fate of `TestDataConfig.swift`. |
 

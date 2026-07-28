@@ -78,13 +78,16 @@ WeChatMoments/
 │   └── FooterView.swift        # not wired in
 ├── ViewModel/
 │   └── MomentsViewModel.swift
-├── Service/                    # ⚠️ singular
+├── Services/
 │   ├── HttpService.swift       # BaseService protocol + HttpService
+│   ├── NetworkError.swift      # the single failure type (FAD-DATA-b)
 │   ├── TweetService.swift
 │   └── UserService.swift
+├── Mocks/                      # #if DEBUG — shared by previews and tests
+│   └── MockBaseService.swift
 ├── Config/
 │   ├── Constant.swift          # enum Constants (⚠️ SCREAMING_SNAKE members)
-│   └── UrlConstant.swift       # enum UrlConstant (⚠️ userProfleUrl typo)
+│   └── UrlConstant.swift       # enum UrlConstant
 ├── Utils/
 │   └── ImageHelper.swift
 ├── Extension/                  # ⚠️ singular
@@ -219,15 +222,17 @@ The project was migrated from `objectVersion = 56` (explicit file listing) to `o
 
 ```swift
 protocol BaseService {
-    func get(url: URL) -> AnyPublisher<Data, URLError>
+    func get(url: URL) -> AnyPublisher<Data, NetworkError>
 }
 ```
 
 `HttpService` is its only production implementation and the only type in the app that references `URLSession`. Feature services compose it, build their URL from `UrlConstant`, and decode.
 
-### 5.2 Two defects in the current seam
+### 5.2 Two defects the seam used to carry
 
-⛔ **The injection point does not exist.** `TweetService` and `UserService` both declare `private var httpService: BaseService` — correctly typed against the protocol — and then hard-code `self.httpService = HttpService()` in a no-argument `init()`. The protocol is therefore decorative: no test, preview, or alternate configuration can supply a different implementation. The fix is a default-argument initialiser, which changes no existing call site:
+Both were fixed in commit 02; the history is retained because the shape of the fix is the reason the seam is now worth having.
+
+**The injection point did not exist.** `TweetService` and `UserService` both declared `private var httpService: BaseService` — correctly typed against the protocol — and then hard-coded `self.httpService = HttpService()` in a no-argument `init()`. The protocol was decorative: no test, preview, or alternate configuration could supply a different implementation. Both now take a default-argument initialiser, which changed no existing call site:
 
 ```swift
 init(httpService: BaseService = HttpService()) {
@@ -235,11 +240,13 @@ init(httpService: BaseService = HttpService()) {
 }
 ```
 
-⛔ **The failure type cannot express HTTP.** `get(url:)` does `.map(\.data)`, discarding the `HTTPURLResponse` entirely, so a 404 body is delivered as success `Data` and handed to the decoder (`FR-API-005`, `NFR-DATA-003`). Fixing this requires both status validation *and* a failure type wider than `URLError`, since `URLError` has no representation for "the server said 404" — see `FAD-DATA-b`.
+**The failure type could not express HTTP.** `get(url:)` did `.map(\.data)`, discarding the `HTTPURLResponse` entirely, so a 404 body was delivered as success `Data` and handed to the decoder (`FR-API-005`, `NFR-DATA-003`). The fix required both status validation *and* a failure type wider than `URLError`, which has no representation for "the server said 404". `Services/NetworkError.swift` is that type and is carried end-to-end — see `FAD-DATA-b` (`nfr §2.12`).
 
 ### 5.3 Decoding responsibility
 
 Decoding belongs to the **feature service**, not to `HttpService`. This keeps the transport ignorant of domain types and gives each service a natural home for its own tolerance rules — in particular the per-element lenient decoding of the feed (`NFR-DATA-001`), which applies to `TweetService` and not to `UserService`.
+
+A decode failure is *also* a `NetworkError` — `.decoding(Error)` — so a feature service publishes `AnyPublisher<[Tweet], NetworkError>` rather than widening back to `any Error`. The view model therefore receives one typed failure for the whole pipeline, which is what `NFR-DATA-005` needs somewhere to land.
 
 ---
 
@@ -326,7 +333,7 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 ## 9. Configuration and Constants
 
-- `Config/UrlConstant.swift` owns endpoint construction. The host is private; only the two typed builders are exposed. ⛔ *`userProfleUrl(name:)` is misspelled; rename to `userProfileUrl(name:)`.*
+- `Config/UrlConstant.swift` owns endpoint construction. The host is private; only the two typed builders are exposed. *`userProfleUrl(name:)` was renamed to `userProfileUrl(name:)` in commit 02, alongside its only caller.*
 - `Config/Constant.swift` owns intrinsic sizes, font sizes, the fixed username, and the placeholder asset name. Constants describe things that are genuinely fixed regardless of device — an avatar is 40×40 everywhere. They **MUST NOT** be used to derive container widths (`NFR-LAYOUT-001`).
 - ⛔ *Members are named in `SCREAMING_SNAKE_CASE` (`USER_NAME`, `FONT_SIZE_CONTENT`, `SENDER_AVATAR_SIZE`). Swift convention is `lowerCamelCase`. Rename as files are touched; do not do it as a standalone sweep (§2.3).*
 - Duplicated constants are a smell: `HeaderView` re-declares its own `avatarImageWidth`/`nickNameFontSize` privately rather than reading `Constants`. Values used by exactly one view **MAY** stay local; values shared across views **MUST** live in `Config`.
@@ -340,10 +347,10 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 | Suite | Requires | Contents |
 |-------|----------|----------|
-| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; filtering rules; pagination window transitions; service behaviour against `MockBaseService`; image-loader cache and failure paths. |
-| **Integration** | mountebank on `localhost:2727`. | The existing `HttpServiceTests` / `TweetServiceTests` / `UserServiceTests`, which assert the real contract end-to-end. |
+| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; `HttpService` status validation against `Support/StubURLProtocol.swift`; `TweetService` / `UserService` against `MockBaseService`; filtering rules, pagination window transitions, and image-loader cache and failure paths once those land. |
+| **Integration** | mountebank on `localhost:2727`. | `WeChatMomentsTests/Integration/HttpServiceIntegrationTests.swift` — the endpoints answer, the served feed is still 22 elements, and the catch-all really does return 404. |
 
-⛔ *Today there is no split: all three service test classes hit the live mock, so `xcodebuild test` fails outright when mountebank is not running. How the split is expressed — a fourth target, a naming convention plus a documented `-only-testing` selector, or a test plan — is `FAD-TEST-a`. Note that a test plan requires a shared scheme, which the project does not have (§13).*
+*The split is expressed by folder and by class name, with each integration test opening `try XCTSkipUnless(Mountebank.isReachable)` — `FAD-TEST-a`, resolved in `nfr §4.8`. With mountebank stopped the whole suite passes and those tests report as skipped; no `-only-testing` selector is required to get a green offline run, though `-only-testing:WeChatMomentsTests/HttpServiceIntegrationTests` selects them when the mock is up.*
 
 ### 10.2 Fixtures
 
@@ -360,7 +367,7 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 ### 10.4 Template stubs
 
-⛔ *`WeChatMomentsTests/WeChatMomentsTests.swift` and `WeChatMomentsUITests/WeChatMomentsUITests.swift` are unmodified Xcode templates whose test bodies assert nothing. They inflate the test count without adding confidence and **SHOULD** be replaced with real tests or removed.*
+⛔ *`WeChatMomentsUITests/WeChatMomentsUITests.swift` is an unmodified Xcode template whose test bodies assert nothing. It inflates the test count without adding confidence and **SHOULD** be replaced with real tests or removed. Its unit-target counterpart, `WeChatMomentsTests/WeChatMomentsTests.swift`, was deleted in commit 02.*
 
 ---
 
@@ -368,11 +375,11 @@ Mocks/MockImageLoader.swift              # #if DEBUG
 
 - **One type per file**, and the file is named for that type. *`Model/MyModels.swift` held four types under a name that described none of them; it was split into `Models/{Tweet,User,Comment,Img}.swift` in commit 01 alongside the expansion for `FR-API-003`.*
 - **Role suffixes:** `…View`, `…ViewModel`, `…Service`, `…Loader`, `…Helper`. Protocols describing a capability are named for the capability (`BaseService`, `ImageLoading`).
-- **Folders are plural** when they hold a collection of peers: `Models/`, `Services/`, `Extensions/`, `Mocks/`. ⛔ *`Service/` and `Extension/` are currently singular, inconsistently with `Utils/`.*
+- **Folders are plural** when they hold a collection of peers: `Models/`, `Services/`, `Extensions/`, `Mocks/`. ⛔ *`Extension/` is still singular, inconsistently with `Utils/`. `Service/` was pluralised in commit 02, which edited every file in it.*
 - **Singular/plural consistency within a feature.** ⛔ *`MomentView` (singular) pairs with `MomentsViewModel` (plural). The screen shows moments; both should be plural.*
 - **Extensions** are named `Type+Purpose.swift`, not after the type alone. ⛔ *`Extension/Color.swift` should be `Color+Moments.swift`.*
 - **Swift casing throughout.** `lowerCamelCase` for properties and constants (§9), `UpperCamelCase` for types.
-- **Spelling is part of the API.** ⛔ *`userProfleUrl`, `commentsBackgroudColor` — both misspelled, both public surface.*
+- **Spelling is part of the API.** ⛔ *`commentsBackgroudColor` is still misspelled. `userProfleUrl` was corrected in commit 02, with its caller.*
 - **Comments carry spec references.** Non-obvious code cites the requirement that motivates it — `// FR-PAGE-003: idempotent at end of list`, `// NFR-DATA-001: per-element tolerance`. This is how a reader (human or agent) gets from a line of code back to the reason it exists.
 
 ---
@@ -394,7 +401,8 @@ Recorded rather than guessed. None of these blocks establishing the structure ab
 3. **`FAD-ARCH-c` — withdrawn 2026-07-27.** This entry claimed the UI-test target's `PRODUCT_BUNDLE_IDENTIFIER` duplicated the unit-test bundle's. **It was wrong.** The identifiers are `com.gl.WeChatMomentsTests` and `com.gl.WeChatMomentsUITests` respectively and always were. The claim entered this document unverified; it is retained here as a withdrawal rather than deleted, per the deprecate-in-place rule in [`README.md §4`](./README.md).
 4. **`FAD-ARCH-d` — composition root.** The target layout (§2.2) introduces `App/RootView.swift` to construct the view model and its services. Whether this is worth a file for a single screen, versus constructing in `WeChatMomentsApp`, is open. It becomes clearly worthwhile the moment §5.2's injection fix lands, because something has to supply the dependencies.
 5. **`FAD-PERF-a` — concurrency mechanism** (§8.3). Owned by `non-functional-requirements.md §1.9`; restated here because it shapes `Services/ImageLoader.swift`.
-6. **`FAD-DATA-b` — the `BaseService` failure type** (§5.2). Owned by `non-functional-requirements.md §2.9`; restated here because it changes a protocol signature in this document.
+6. **`FAD-DATA-b` — the `BaseService` failure type** (§5.2). **Resolved 2026-07-27 ✅** — `Services/NetworkError.swift`, carried end-to-end. Owned by `non-functional-requirements.md §2.12`; the protocol signature in §5.1 is updated accordingly.
+7. **`FAD-TEST-a` — the unit/integration split** (§10.1). **Resolved 2026-07-27 ✅** — folder plus class-name convention plus an `XCTSkipUnless` reachability guard. Owned by `non-functional-requirements.md §4.8`. Note that it was resolved *without* resolving `FAD-ARCH-b`, which the test-plan alternative would have required.
 
 ---
 

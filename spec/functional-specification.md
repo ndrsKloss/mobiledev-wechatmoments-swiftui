@@ -104,7 +104,7 @@ This coupling is load-bearing and easy to undo by accident: relaxing `sender` ba
 |----|-------|-------------|
 | `FR-API-003` | MUST | The tweet model **MUST** decode `sender`, `content`, `images`, and `comments`. |
 | `FR-API-004` | MUST | A malformed element in the feed array **MUST NOT** fail the decode of the remaining elements. See `NFR-DATA-001` for the mechanism. |
-| `FR-API-005` | MUST | A non-2xx HTTP response **MUST** be surfaced as an error, not passed to the decoder. ⛔ *Not met — `HttpService.get(url:)` maps away the `HTTPURLResponse`, so the catch-all stub's 404 body flows straight into `.decode`. See `NFR-DATA-003`.* |
+| `FR-API-005` | MUST | A non-2xx HTTP response **MUST** be surfaced as an error, not passed to the decoder. *`HttpService.get(url:)` validates the status before returning the body and fails with `NetworkError.httpStatus(_:)`. See `NFR-DATA-003`.* |
 | `FR-API-006` | MUST | Image and avatar URLs point at a **real remote host** (`techops-recsys-lateral-hiring.github.io`); the mock serves JSON only. Image loading is therefore genuinely networked and **MUST** obey `NFR-PERF-*`. |
 
 ### 3.4 Catch-all stub

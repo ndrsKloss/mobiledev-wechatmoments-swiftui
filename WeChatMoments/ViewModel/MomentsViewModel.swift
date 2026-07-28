@@ -45,7 +45,10 @@ class MomentsViewModel: ObservableObject {
             }.store(in: &cancellable)
     }
 
-    fileprivate func completionHandler(_ completion: Subscribers.Completion<any Error>, message: String) {
+    // FAD-DATA-b: the services now fail with `NetworkError` rather than `any Error`. Only the
+    // signature moves here — surfacing the error to the view instead of printing it is
+    // NFR-DATA-005 / FR-FEED-004, and belongs with the loading-state rework.
+    fileprivate func completionHandler(_ completion: Subscribers.Completion<NetworkError>, message: String) {
         showIndicator.toggle()
         switch completion {
             case .finished:
