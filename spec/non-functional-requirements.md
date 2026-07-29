@@ -156,7 +156,7 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 | `NFR-DATA-002` | MUST | Every optional field in the data contract **MUST** be modelled as optional in Swift, and every consumer **MUST** handle its absence. |
 | `NFR-DATA-003` | MUST | HTTP responses **MUST** be status-validated before decoding; a non-2xx status **MUST** produce a typed error. *`HttpService.get(url:)` requires an `HTTPURLResponse` in `200..<300` before returning the body, and fails with `NetworkError.httpStatus(_:)` otherwise (§2.12). Pinned offline by `HttpServiceTests`.* |
 | `NFR-DATA-004` | MUST | A failed or missing image **MUST** render the placeholder asset (`Constants.DEFAULT_EMPTY_IMAGE`). Force-unwrapping an image result is **forbidden**. *`View/RemoteImage.swift` falls back to the placeholder whenever the loader returns `nil`, and the three force-unwrapping call sites were deleted with the helpers that fed them in commit 03.* |
-| `NFR-DATA-005` | MUST | Errors **MUST** be surfaced to the view model as typed values that the view can render (`FR-FEED-004`). ⛔ *Not met — `MomentsViewModel.completionHandler` `print`s the error and discards it.* |
+| `NFR-DATA-005` | MUST | Errors **MUST** be surfaced to the view model as typed values that the view can render (`FR-FEED-004`). *The `completionHandler` that `print`ed and discarded is gone; a failure becomes `Loadable.failed(NetworkError)`, and `FeedErrorView` renders the reason from the `LocalizedError` conformance `NetworkError` already carried (§2.12). Nothing in the chain widens to `any Error`, which is what makes the rendered reason the real one.* |
 | `NFR-DATA-006` | SHOULD | Diagnostic logging of dropped elements **SHOULD** be available in DEBUG builds (see `fn-spec §8 Q5`). |
 | `NFR-DATA-007` | MUST | List identity **MUST** be stable and unique. |
 
@@ -187,7 +187,7 @@ The mock feed is deliberately hostile (`fn-spec §3.3`). The app **MUST** degrad
 
 - **`FAD-DATA-a`:** **Resolved 2026-07-27 ✅** — see §2.10.
 - **`FAD-DATA-b`:** **Resolved 2026-07-27 ✅** — see §2.12.
-- **`FAD-DATA-c`:** the visual treatment of the error state — inline row, full-screen replacement, or a retry banner. Currently unspecified anywhere.
+- ~~**`FAD-DATA-c`**~~ — **Resolved 2026-07-29 ✅** — see §2.13.
 - **`FAD-DATA-d`:** **Resolved 2026-07-27 ✅** — see §2.11.
 - **Assumption:** no retry policy is required for this exercise; a failed request stays failed until the user refreshes.
 
@@ -241,6 +241,40 @@ enum NetworkError: Error {
 **Assumption carried:** `.httpStatus` discards the response body. The catch-all stub returns `{"error": "User not found"}` alongside its 404, and nothing in the app displays it. If an error state ever needs to show a server-supplied message, this is the case that gains an associated value.
 
 **Verified:** `HttpServiceTests` asserts 200 → data, 404/500/304 → `.httpStatus` with the right code, and a `URLError` → `.transport`, all against a stubbed `URLProtocol` with no network. `TweetServiceTests` and `UserServiceTests` assert the same errors survive the decode stage without being reclassified.
+
+### 2.13 Resolved: the visual treatment of the error state (`FAD-DATA-c`) ✅
+
+Ratified **2026-07-29**. A **full-screen message** where the tweets would be — `View/FeedErrorView.swift`:
+an icon, the line *"Couldn't load the feed"*, and the reason taken from `NetworkError`'s
+`LocalizedError` conformance. **No retry button.**
+
+**Why a message and not a banner.** The requirement it serves is `FR-FEED-004`, whose trigger is
+*total* failure of the feed request. In that state there is no list for a banner to sit above — it
+would float over emptiness and read as decoration. A message occupying the space the feed would have
+occupied says the true thing: there is nothing here, and here is why.
+
+**Why it sits below the header rather than replacing the screen.** The two requests are independent
+(`FR-FEED-005`), so a profile that loaded should still be visible. Replacing the whole screen would
+have thrown away a successful request to report a failed one. This is the same reason `Loadable` is
+held per request rather than per screen (`arch-spec §4.2`).
+
+**Why no retry button.** §2.9 already carries the assumption that no retry policy is required and a
+failed request stays failed until the user refreshes. Pull-to-refresh is `FR-PAGE-004` and arrives in
+its own commit; adding a second, differently-shaped recovery affordance first would pre-empt it.
+
+**What it cost, stated plainly.** Until `FR-PAGE-004` lands there is **no recovery path in the UI at
+all** — a user who launches with the backend down must kill and relaunch the app. That is a real gap
+in the interim, accepted because the alternative is an affordance the brief does not ask for and that
+`FR-PAGE-004` will duplicate.
+
+**Assumption carried:** `NetworkError.errorDescription` is fit to show a user. It is developer-facing
+English and it is not localized — which is consistent with `README.md §5` placing localization out of
+scope, but it is the sentence a user reads. If the error state ever needs a designed voice, this is
+the line that changes.
+
+**Verified:** with mountebank stopped, the app renders *"Couldn't load the feed / Could not connect to
+the server."* instead of an indicator that never stops (`fn-spec §7`, last bullet). Each `NetworkError`
+case has its own SwiftUI preview.
 
 ---
 
@@ -311,11 +345,11 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. *`TweetService` and `UserService` take `init(httpService: BaseService = HttpService())`; `HttpService` already took `init(urlSession:)`. `ImageLoader` takes `init(urlSession:)` and reaches the view tree as `any ImageLoading` through `EnvironmentValues.imageLoader`, constructed once in `WeChatMomentsApp` — environment rather than a defaulted constructor argument, which would have built a separate loader per view and destroyed the shared cache. `MomentsViewModel` still constructs both network services internally — that is `arch-spec §4.2`'s remaining gap, not this one.* |
+| `NFR-TEST-001` | MUST | Every dependency that performs I/O **MUST** be injectable behind a protocol. *`TweetService` and `UserService` take `init(httpService: BaseService = HttpService())`; `HttpService` already took `init(urlSession:)`. `ImageLoader` takes `init(urlSession:)` and reaches the view tree as `any ImageLoading` through `EnvironmentValues.imageLoader`, constructed once in `WeChatMomentsApp` — environment rather than a defaulted constructor argument, which would have built a separate loader per view and destroyed the shared cache. `MomentsViewModel` takes `init(tweetService:userService:)` with the same defaulted-argument pattern, closing `arch-spec §4.2`'s gap; no new protocol was added, because the services perform no I/O themselves and the injectable `BaseService` they compose is the seam the tests actually need (`arch-spec §6`).* |
 | `NFR-TEST-002` | MUST | Unit tests **MUST NOT** require a live network or a running mountebank instance. *The full suite passes with mountebank stopped; the three genuine integration tests skip (§4.8).* |
 | `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. |
 | `NFR-TEST-004` | MUST | Tests that genuinely require mountebank **MUST** be identifiable as integration tests — by naming, by target, or by a documented `-only-testing` selector — so that the offline suite can be run alone. |
-| `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). |
+| `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). *`MomentsViewModelTests` drives the initial window, the loading flag and both failure paths through `MockBaseService` with no view. The append and refresh transitions join it when `FR-PAGE-002/004` land; §4.5's full 5 → 10 → 15 → 5 sequence is not yet assertable because two of its three intents do not exist.* |
 | `NFR-TEST-006` | SHOULD | Data transforms — filtering (`FR-DATA-*`), paging windows, grid-column derivation — **SHOULD** be pure functions over their inputs, so they can be tested without any object graph. This is the concrete form the brief's "functional programming is appreciated" takes. *`TweetFilter` is the first of these — a `static` pure transform over `[Tweet]` that the view model calls but does not own, tested by `TweetFilterTests` with no view model instantiated. `ImageGridLayout` is the second: `fn-spec §5` as a function of the image count, and the only way the table's rows for 2 and 5–8 images are covered at all, since the served feed never carries those counts.* |
 | `NFR-TEST-007` | SHOULD | Mocks **SHOULD** live in a single `Mocks/` folder, guarded by `#if DEBUG`, and be shared between SwiftUI previews and tests. |
 | `NFR-TEST-008` | SHOULD | The scenarios in `fn-spec §7` **SHOULD** each have a corresponding automated test where the scenario is observable without a device. |
@@ -395,7 +429,7 @@ Cross-cutting checks for every row: no main-thread stalls while scrolling; no ma
 | ~~`FAD-PERF-c`~~ | Images | Downsampling primitive — `ImageIO` thumbnails vs. the existing `UIImage.resize(_:)`. **Resolved 2026-07-27 ✅** — §1.12. |
 | ~~`FAD-DATA-a`~~ | Decoding | Mechanism for per-element lenient decoding. **Resolved 2026-07-27 ✅** — §2.10. |
 | ~~`FAD-DATA-b`~~ | Errors | Replacement error type for `URLError` in `BaseService`, able to express HTTP status. **Resolved 2026-07-27 ✅** — §2.12. |
-| `FAD-DATA-c` | Errors | Visual treatment of the error state. |
+| ~~`FAD-DATA-c`~~ | Errors | Visual treatment of the error state. **Resolved 2026-07-29 ✅** — §2.13, a full-screen message with no retry button. |
 | ~~`FAD-DATA-d`~~ | Identity | Stable identity for `Tweet` — the payload carries no id. **Resolved 2026-07-27 ✅** — §2.11. |
 | `FAD-LAYOUT-a` | Layout | Whether `HeaderView`'s fixed 370pt height becomes proportional. |
 | `FAD-LAYOUT-b` | Layout | Whether Dynamic Type is pursued at all. |

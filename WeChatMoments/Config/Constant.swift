@@ -11,6 +11,10 @@ enum Constants {
     static let USER_NAME = "jsmith"
     static let DEFAULT_EMPTY_IMAGE = "emptyImage"
 
+    /// FR-PAGE-001/002/004, arch-spec §7.3 and §9: the page size lives here rather than as a
+    /// literal in the view model, because three separate requirements quote the same 5.
+    static let PAGE_SIZE = 5
+
     static let FONT_SIZE_COMMENT: CGFloat = 12
     static let FONT_SIZE_CONTENT: CGFloat = 15
     static let SENDER_AVATAR_SIZE = CGSize(width: 40, height: 40)

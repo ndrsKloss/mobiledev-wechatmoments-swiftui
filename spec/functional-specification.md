@@ -30,7 +30,8 @@ The whole product is therefore: **fetch two endpoints, render a header and a pag
 | 2 | **Tweet cell** | Sender avatar (leading), sender nick, optional text content, optional image grid, optional comment block. | `View/TweetView.swift` + `View/ImageGridView.swift` | All four regions render from the payload |
 | 3 | **Comment block** | Zero or more comment rows, each *"<sender nick>: <content>"*. Hidden entirely when there are no comments. | `View/CommentBlockView.swift` + `View/CommentRowView.swift` | Wired in; the block owns the hide-when-empty rule, the row draws one line |
 | 4 | **Cell separator** | A hairline rule between tweets. | `View/FooterView.swift` | Wired in, inside the tweet's list row |
-| 5 | **Loading indicator** | A circular progress indicator while the initial fetch is in flight. | `MomentView.swift` (`.overlay`) | Present; toggle logic is unbalanced (`arch-spec §4.2`) |
+| 5 | **Loading indicator** | A circular progress indicator while the initial fetch is in flight. | `MomentView.swift` (`.overlay`) | Present; driven by `MomentsViewModel.showIndicator`, which is derived from the two requests' states |
+| 6 | **Feed error state** | A message standing where the tweets would be when the feed request fails outright. | `View/FeedErrorView.swift` | Present; sits below the header, so a profile that loaded is still visible (`FR-FEED-005`) |
 
 The header scrolls with the feed — it is the first row of the list, not a pinned chrome element. `[C]` (`MomentView` places `HeaderView` inside the `List`.)
 
@@ -129,11 +130,11 @@ Any unmatched path returns **404** with `{"error": "User not found"}`. The exist
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `FR-FEED-001` | MUST | On first appearance the app **MUST** fetch the profile and the full tweet list, and **MUST** hold the complete tweet list in memory. *(Brief: "All tweets are fetched and stored in memory at the first time".)* |
-| `FR-FEED-002` | MUST | The in-memory list **MUST** be the sole source for pagination — scrolling and refreshing **MUST NOT** re-request the feed endpoint. Pull-to-refresh is the one exception (`FR-PAGE-004`). |
-| `FR-FEED-003` | MUST | A loading indicator **MUST** be shown while the initial fetch is in flight and hidden when it settles, in both the success and failure cases. ⛔ *Not met — `MomentsViewModel.loadData()` toggles `showIndicator` twice synchronously before either request completes, then each completion toggles it again; the flag does not track the actual in-flight state.* |
-| `FR-FEED-004` | MUST | Total failure of the feed request **MUST** produce a user-visible error state, not a silently empty list. ⛔ *Not met — errors are `print`ed only.* |
-| `FR-FEED-005` | SHOULD | Failure of the profile request **SHOULD NOT** prevent the feed from rendering, and vice versa. The two requests are independent. |
+| `FR-FEED-001` | MUST | On first appearance the app **MUST** fetch the profile and the full tweet list, and **MUST** hold the complete tweet list in memory. *(Brief: "All tweets are fetched and stored in memory at the first time".)* *`MomentsViewModel.loadInitialData()` stores the whole filtered feed as `Loadable<[Tweet]>`; `allTweets` is all 15, independent of what is shown.* |
+| `FR-FEED-002` | MUST | The in-memory list **MUST** be the sole source for pagination — scrolling and refreshing **MUST NOT** re-request the feed endpoint. Pull-to-refresh is the one exception (`FR-PAGE-004`). *`loadInitialData()` is guarded on the `.idle` state, so the repeated `.onAppear` that a rebuilt row or a return from the background produces cannot re-fetch.* |
+| `FR-FEED-003` | MUST | A loading indicator **MUST** be shown while the initial fetch is in flight and hidden when it settles, in both the success and failure cases. *`showIndicator` is derived — `feed.isLoading \|\| profile.isLoading` — so it cannot drift from the work it describes. It replaced a flag toggled twice before either request started and once more per completion.* |
+| `FR-FEED-004` | MUST | Total failure of the feed request **MUST** produce a user-visible error state, not a silently empty list. *The failure is the `.failed(NetworkError)` case of `feed`, rendered by `View/FeedErrorView.swift`. The visual treatment was `FAD-DATA-c`, resolved in `nfr §2.13`.* |
+| `FR-FEED-005` | SHOULD | Failure of the profile request **SHOULD NOT** prevent the feed from rendering, and vice versa. The two requests are independent. *Structural rather than remembered: `feed` and `profile` are separate `Loadable` values and each completion writes only its own, so neither failure has a path to the other.* |
 
 ### 4.3 Pagination (`FR-PAGE`)
 
@@ -141,11 +142,11 @@ The brief's three pagination sentences, made precise. **Page size is 5.**
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `FR-PAGE-001` | MUST | After the initial load, exactly the **first 5** displayable tweets **MUST** be shown. ⛔ *Not met — no pagination exists; `MomentView` renders every tweet the view model holds.* |
+| `FR-PAGE-001` | MUST | After the initial load, exactly the **first 5** displayable tweets **MUST** be shown. *`displayedCount` is set to `min(Constants.PAGE_SIZE, count)` when the feed lands, and `displayedTweets` is `Array(allTweets.prefix(displayedCount))`. The `min` is what makes §8 Q6 free.* |
 | `FR-PAGE-002` | MUST | When the user scrolls to the bottom of the list, the next **5** tweets **MUST** be appended to the displayed window. ⛔ *Not met.* |
 | `FR-PAGE-003` | MUST | Appending **MUST** stop cleanly once the in-memory list is exhausted; the final page **MAY** contain fewer than 5 tweets. Reaching the end **MUST NOT** trigger a repeated append or an error. |
 | `FR-PAGE-004` | MUST | Pull-to-refresh **MUST** reset the displayed window to the **first 5** tweets. *(Brief: "only first 5 items are shown after refreshing".)* ⛔ *Not met — no refresh control exists.* |
-| `FR-PAGE-005` | MUST | The displayed window is derived state owned by the view model, not by the view. See `arch-spec §7`. |
+| `FR-PAGE-005` | MUST | The displayed window is derived state owned by the view model, not by the view. See `arch-spec §7`. *`MomentView` reads `momentsViewModel.displayedTweets` and computes nothing; `MomentsViewModelTests` asserts the window with no view instantiated (`NFR-TEST-005`).* |
 | `FR-PAGE-006` | SHOULD | Whether pull-to-refresh **re-fetches** the feed from the network or merely resets the window over the cached list is open — see §8 Q2. Until resolved, re-fetching is the safer reading of "refresh". |
 
 ### 4.4 Tweet rendering (`FR-TWEET`)

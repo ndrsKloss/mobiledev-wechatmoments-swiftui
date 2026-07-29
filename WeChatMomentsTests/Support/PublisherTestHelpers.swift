@@ -60,6 +60,30 @@ extension XCTestCase {
         }
     }
 
+    /// Waits for a `@Published` property to reach a value satisfying `predicate`.
+    ///
+    /// `MockBaseService` answers synchronously, but the view model's `.receive(on: RunLoop.main)`
+    /// (`NFR-PERF-004`) defers delivery by a runloop turn, so an assertion made straight after
+    /// `loadInitialData()` would read the pre-delivery state. This waits for the turn without
+    /// reaching for a sleep.
+    func awaitPublished<P: Publisher>(
+        _ publisher: P,
+        timeout: TimeInterval = 1,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        until predicate: @escaping (P.Output) -> Bool
+    ) where P.Failure == Never {
+        let settled = expectation(description: "published value satisfied the predicate")
+        settled.assertForOverFulfill = false
+
+        let cancellable = publisher.sink { value in
+            if predicate(value) { settled.fulfill() }
+        }
+
+        wait(for: [settled], timeout: timeout)
+        cancellable.cancel()
+    }
+
     /// Asserts a publisher fails, returning its error.
     func awaitFailure<P: Publisher>(
         _ publisher: P,

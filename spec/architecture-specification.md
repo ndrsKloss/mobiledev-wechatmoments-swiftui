@@ -78,9 +78,11 @@ WeChatMoments/
 │   ├── RemoteImage.swift       # async image view owning its @State image + token (§8.4)
 │   ├── CommentBlockView.swift  # hides itself when comments are absent or empty (FR-TWEET-006)
 │   ├── CommentRowView.swift    # one comment line
+│   ├── FeedErrorView.swift     # the feed's error state (FR-FEED-004, FAD-DATA-c)
 │   └── FooterView.swift        # the hairline between cells (FR-TWEET-008)
 ├── ViewModel/
 │   ├── MomentsViewModel.swift
+│   ├── Loadable.swift          # one request's lifecycle as a value (§4.2)
 │   ├── TweetFilter.swift       # pure display filter (FR-DATA-001/002, NFR-TEST-006)
 │   └── ImageGridLayout.swift   # pure grid-layout derivation (fn-spec §5, NFR-TEST-006)
 ├── Services/
@@ -199,7 +201,7 @@ The project was migrated from `objectVersion = 56` (explicit file listing) to `o
 ### 4.1 View
 
 - A `struct: View` receiving what it needs by `init`; the root view owns its view model as **`@StateObject`**, subviews receive plain values or `@ObservedObject`.
-- ⛔ *`MomentView` currently declares `@ObservedObject var momentsViewModel = MomentsViewModel()`. With `@ObservedObject`, SwiftUI does not own the object's lifetime, so the view model is recreated on every structural re-render of the parent — losing the loaded feed and the pagination window. This **MUST** be `@StateObject`. It is the single highest-impact one-line fix in the codebase, and it becomes actively harmful the moment pagination state exists.*
+- *`MomentView` declared `@ObservedObject var momentsViewModel = MomentsViewModel()` until commit 06. With `@ObservedObject` SwiftUI does not own the object's lifetime, so the view model was recreated on every structural re-render of the parent — losing the loaded feed and, once it existed, the pagination window. It is now `@StateObject private var`, and it landed in the same commit as the window rather than after it, because the two defects are only harmful together.*
 - Decomposed into small `private` subviews; each receives only the data it needs.
 - Calls **intent methods** on the view model (`viewModel.loadInitialData()`, `viewModel.loadNextPage()`, `viewModel.refresh()`), never mutating its state directly.
 - Owns no filtering, no paging arithmetic, and no image-fetch orchestration beyond asking the loader for a URL.
@@ -211,8 +213,8 @@ The project was migrated from `objectVersion = 56` (explicit file listing) to `o
   - the **full** decoded feed, filtered per `FR-DATA-001/002` at the point of entry;
   - the **displayed window** (`FR-PAGE-*`), as derived state — see §7;
   - the loading flag and the error state.
-- ⛔ *`MomentsViewModel.loadData()` currently toggles `showIndicator` twice in immediate succession — before either request has completed — and each request's completion handler toggles it once more. The flag therefore does not track in-flight work at all (`FR-FEED-003`). Loading state **MUST** be derived from the number of outstanding requests, or modelled as an explicit state enum (`idle` / `loading` / `loaded` / `failed`), which also gives `NFR-DATA-005` somewhere to live.*
-- ⛔ *It also constructs `TweetService()` and `UserService()` as stored property initialisers, so nothing can inject a mock (`NFR-TEST-001`).*
+- *`MomentsViewModel.loadData()` toggled `showIndicator` twice in immediate succession — before either request had completed — and each completion handler toggled it once more, so the flag tracked no in-flight work at all (`FR-FEED-003`). Resolved in commit 06 with the **explicit state enum** this section offered, `ViewModel/Loadable.swift`, held **once per request** rather than once per screen: `feed: Loadable<[Tweet]>` and `profile: Loadable<User>`. The indicator is derived from the pair and the error state is the `.failed` case, which is the `NFR-DATA-005` home this section predicted. Per-request rather than per-screen is what makes `FR-FEED-005` structural — a completion can only write its own property, so neither failure has a path to the other.*
+- *It also constructed `TweetService()` and `UserService()` as stored property initialisers, so nothing could inject a mock (`NFR-TEST-001`). It now takes `init(tweetService:userService:)` with the §6 defaulted-argument pattern. No protocol was introduced for either service: they perform no I/O themselves, and `MockBaseService` one hop down is what the tests need.*
 - Never imports SwiftUI view types and never performs navigation.
 
 ### 4.3 View ⇄ ViewModel contract
@@ -286,6 +288,8 @@ The view model holds two things:
 
 The displayed window is a **derived value**, not a second stored array: `Array(allTweets.prefix(displayedCount))`. Storing it separately introduces a synchronisation bug for no benefit.
 
+*Both landed in commit 06, as `feed: Loadable<[Tweet]>` and `@Published private(set) var displayedCount`, with `displayedTweets` the derived prefix. `prefix` clamps on its own, so a feed shorter than a page needs no special case (`fn-spec §8 Q6`).*
+
 ### 7.2 Why the view model and not the view
 
 - `FR-PAGE-005` requires it, and `NFR-TEST-005` depends on it: a window computed inside `body` cannot be asserted without rendering.
@@ -295,11 +299,11 @@ The displayed window is a **derived value**, not a second stored array: `Array(a
 
 | Intent | Effect |
 |--------|--------|
-| `loadInitialData()` | Fetch, filter, store the full feed; set displayed count to 5. |
-| `loadNextPage()` | `displayedCount = min(displayedCount + 5, allTweets.count)`. Idempotent at the end of the list (`FR-PAGE-003`); no network. |
-| `refresh()` | Reset displayed count to 5. Whether it also re-fetches is `fn-spec §8 Q2`. |
+| `loadInitialData()` | Fetch, filter, store the full feed; set displayed count to 5. *Built in commit 06. Guarded on the `.idle` state so a repeated `.onAppear` cannot re-request (`FR-FEED-002`).* |
+| `loadNextPage()` | `displayedCount = min(displayedCount + 5, allTweets.count)`. Idempotent at the end of the list (`FR-PAGE-003`); no network. *Not yet built — `FR-PAGE-002`.* |
+| `refresh()` | Reset displayed count to 5. Whether it also re-fetches is `fn-spec §8 Q2`. *Not yet built — `FR-PAGE-004`.* |
 
-The page size (5) is a named constant in `Config/Constants.swift`, not a literal scattered across the view model.
+The page size (5) is a named constant in `Config/Constants.swift`, not a literal scattered across the view model. *`Constants.PAGE_SIZE`, added in commit 06; it keeps the file's existing `SCREAMING_SNAKE` convention rather than pre-empting the §9 rename.*
 
 ### 7.4 Trigger
 
@@ -386,7 +390,7 @@ SwiftUI's own `AsyncImage` was the obvious alternative and is rejected: it offer
 
 | Suite | Requires | Contents |
 |-------|----------|----------|
-| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; `HttpService` status validation against `Support/StubURLProtocol.swift`; `TweetService` / `UserService` against `MockBaseService`; `ImageLoader`'s cache, coalescing, downsampling and failure paths against the same `StubURLProtocol`; filtering rules and pagination window transitions once those land. |
+| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; `HttpService` status validation against `Support/StubURLProtocol.swift`; `TweetService` / `UserService` against `MockBaseService`; `ImageLoader`'s cache, coalescing, downsampling and failure paths against the same `StubURLProtocol`; filtering rules; and `MomentsViewModel`'s initial window, loading flag and failure paths against `MockBaseService`, with the append and refresh transitions to follow those intents. |
 | **Integration** | mountebank on `localhost:2727`. | `WeChatMomentsTests/Integration/HttpServiceIntegrationTests.swift` — the endpoints answer, the served feed is still 22 elements, and the catch-all really does return 404. |
 
 *The split is expressed by folder and by class name, with each integration test opening `try XCTSkipUnless(Mountebank.isReachable)` — `FAD-TEST-a`, resolved in `nfr §4.8`. With mountebank stopped the whole suite passes and those tests report as skipped; no `-only-testing` selector is required to get a green offline run, though `-only-testing:WeChatMomentsTests/HttpServiceIntegrationTests` selects them when the mock is up.*
@@ -438,7 +442,7 @@ Recorded rather than guessed. None of these blocks establishing the structure ab
 1. **`FAD-ARCH-a` — pbxproj format.** **Resolved 2026-07-27 ✅** — see §2.5.
 2. **`FAD-ARCH-b` — no shared Xcode scheme.** ⚠️ The only scheme lives in `WeChatMoments.xcodeproj/xcuserdata/`, so it is not in git and `xcodebuild -scheme WeChatMoments` works **only on the original author's machine**. Every build and test command in `CLAUDE.md` and in this spec depends on it. Moving it to `xcshareddata/xcschemes/` and committing it is a small change with outsized value for a reviewer cloning the repo, and it is a prerequisite for the test-plan option in `FAD-TEST-a`. *Deliberately deferred.*
 3. **`FAD-ARCH-c` — withdrawn 2026-07-27.** This entry claimed the UI-test target's `PRODUCT_BUNDLE_IDENTIFIER` duplicated the unit-test bundle's. **It was wrong.** The identifiers are `com.gl.WeChatMomentsTests` and `com.gl.WeChatMomentsUITests` respectively and always were. The claim entered this document unverified; it is retained here as a withdrawal rather than deleted, per the deprecate-in-place rule in [`README.md §4`](./README.md).
-4. **`FAD-ARCH-d` — composition root.** The target layout (§2.2) introduces `App/RootView.swift` to construct the view model and its services. Whether this is worth a file for a single screen, versus constructing in `WeChatMomentsApp`, is open. It becomes clearly worthwhile the moment §5.2's injection fix lands, because something has to supply the dependencies.
+4. **`FAD-ARCH-d` — composition root.** The target layout (§2.2) introduces `App/RootView.swift` to construct the view model and its services. Whether this is worth a file for a single screen, versus constructing in `WeChatMomentsApp`, is open. It becomes clearly worthwhile the moment §5.2's injection fix lands, because something has to supply the dependencies. *That moment arrived in commit 06 and the file was still declined, deliberately: the defaulted-argument initialisers mean nothing has to supply anything, so a `RootView` would today only forward. It is worth revisiting the first time a dependency must be chosen rather than defaulted — a preview or UI test wanting a stubbed feed is the likeliest trigger. The `Features/Moments/` migration (§2.2) was declined in the same commit for the same reason: bundled moves are cheap (§2.3), but this commit's diff is already a rewrite of the view model's lifetime, injection, loading and error handling.*
 5. **`FAD-PERF-a` — concurrency mechanism** (§8.3). **Resolved 2026-07-27 ✅** — **GCD**, as the brief asks by name. Owned by `non-functional-requirements.md §1.10`, which records that an `async/await` implementation was built first and reverted, and what that cost. `FAD-PERF-b` and `FAD-PERF-c` were ratified alongside it (§1.11, §1.12).
 6. **`FAD-DATA-b` — the `BaseService` failure type** (§5.2). **Resolved 2026-07-27 ✅** — `Services/NetworkError.swift`, carried end-to-end. Owned by `non-functional-requirements.md §2.12`; the protocol signature in §5.1 is updated accordingly.
 7. **`FAD-TEST-a` — the unit/integration split** (§10.1). **Resolved 2026-07-27 ✅** — folder plus class-name convention plus an `XCTSkipUnless` reachability guard. Owned by `non-functional-requirements.md §4.8`. Note that it was resolved *without* resolving `FAD-ARCH-b`, which the test-plan alternative would have required.

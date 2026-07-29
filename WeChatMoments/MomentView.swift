@@ -8,7 +8,10 @@
 import SwiftUI
 
 struct MomentView: View {
-    @ObservedObject var momentsViewModel = MomentsViewModel()
+    // arch-spec §4.1: @StateObject, not @ObservedObject. With @ObservedObject SwiftUI does not own
+    // the object's lifetime, so a structural re-render of the parent builds a fresh view model —
+    // discarding the loaded feed and resetting the pagination window (FR-PAGE-001) under the user.
+    @StateObject private var momentsViewModel = MomentsViewModel()
 
     private var indicatorView:some View {
         return ProgressView()
@@ -16,8 +19,10 @@ struct MomentView: View {
             .controlSize(.large)
     }
 
+    /// FR-PAGE-001/005: the window is the view model's, already derived. The view does no paging
+    /// arithmetic of its own.
     private var tweets:[Tweet] {
-        return momentsViewModel.tweets?.compactMap{ $0 } ?? []
+        return momentsViewModel.displayedTweets
     }
 
     private var user: User? {
@@ -28,6 +33,12 @@ struct MomentView: View {
         List {
             Group {
                 HeaderView(user: user)
+                // FR-FEED-004: a failed feed reads as a message where the tweets would be, not as
+                // an empty list. It sits below the header because the profile request is
+                // independent and may well have succeeded (FR-FEED-005).
+                if let error = momentsViewModel.feedError {
+                    FeedErrorView(error: error)
+                }
                 // NFR-DATA-007: Tweet carries its own stable id; \.self would collide
                 // on duplicate content.
                 ForEach(tweets) { tweet in
@@ -51,7 +62,9 @@ struct MomentView: View {
             }
         })
         .onAppear {
-            momentsViewModel.loadData()
+            // Idempotent by design — .onAppear fires again on every rebuild of this row and on
+            // return from the background (FR-FEED-002).
+            momentsViewModel.loadInitialData()
         }.ignoresSafeArea()
     }
 }
