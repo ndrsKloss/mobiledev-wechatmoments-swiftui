@@ -27,7 +27,7 @@ The whole product is therefore: **fetch two endpoints, render a header and a pag
 | # | Region | Contents | Rendered today by | Status |
 |---|--------|----------|-------------------|--------|
 | 1 | **Profile header** | Full-bleed profile (cover) image; the user's nick and avatar overlaid near its bottom edge. | `View/HeaderView.swift` | Present; profile image never loads (§3.1) |
-| 2 | **Tweet cell** | Sender avatar (leading), sender nick, optional text content, optional image grid, optional comment block. | `View/TweetView.swift` | Sender, content and comments render from the payload; the image grid is still absent (§4.4) |
+| 2 | **Tweet cell** | Sender avatar (leading), sender nick, optional text content, optional image grid, optional comment block. | `View/TweetView.swift` + `View/ImageGridView.swift` | All four regions render from the payload |
 | 3 | **Comment block** | Zero or more comment rows, each *"<sender nick>: <content>"*. Hidden entirely when there are no comments. | `View/CommentBlockView.swift` + `View/CommentRowView.swift` | Wired in; the block owns the hide-when-empty rule, the row draws one line |
 | 4 | **Cell separator** | A hairline rule between tweets. | `View/FooterView.swift` | Wired in, inside the tweet's list row |
 | 5 | **Loading indicator** | A circular progress indicator while the initial fetch is in flight. | `MomentView.swift` (`.overlay`) | Present; toggle logic is unbalanced (`arch-spec §4.2`) |
@@ -155,13 +155,13 @@ The brief's three pagination sentences, made precise. **Page size is 5.**
 | `FR-TWEET-001` | MUST | Every displayed tweet **MUST** show its sender's nick and avatar. *`TweetView` reads `tweet.sender.avatar` through `RemoteImage` and `tweet.sender.displayName`. Every field of the payload's user is optional (`FR-API-002`), so the nick falls back to the username and then to "Unknown" — `Extension/User+DisplayName.swift`, shared with `FR-TWEET-007`.* |
 | `FR-TWEET-002` | MUST | Text content is **optional**. When absent, no empty text row is rendered. *`TweetView` wraps the content `Text` in `if let content = tweet.content, !content.isEmpty`.* |
 | `FR-TWEET-003` | MUST | Content text **MUST** wrap to as many lines as it needs; it **MUST NOT** be truncated. *`.lineLimit(nil)` plus `.fixedSize(horizontal: false, vertical: true)`; the latter is what stops the enclosing `List` row from collapsing it to one line.* |
-| `FR-TWEET-004` | MUST | Images are **optional**, and when present number **1 to 9**. The grid **MUST** render exactly as many cells as there are images — no placeholder padding cells. ⛔ *Not met — there is no grid. `TweetView.addImagesToView(_from:)` was deleted in commit 03 rather than patched (see the note below), and its replacement has yet to be written; an image-only tweet currently renders as sender and separator alone.* |
-| `FR-TWEET-005` | MUST | The image grid layout **MUST** follow §5. |
+| `FR-TWEET-004` | MUST | Images are **optional**, and when present number **1 to 9**. The grid **MUST** render exactly as many cells as there are images — no placeholder padding cells. *`View/ImageGridView.swift` renders one cell per image and nothing at all for an absent or empty array, owning that rule itself as `CommentBlockView` does. A short row is padded with invisible cells that hold the three-column track open; they are not image cells.* |
+| `FR-TWEET-005` | MUST | The image grid layout **MUST** follow §5. *`ViewModel/ImageGridLayout.swift` is the §5 table as a pure function of the image count, tested without a view (`NFR-TEST-006`) — which is the only way the rows the served feed never exercises (2, 5–8) are pinned at all.* |
 | `FR-TWEET-006` | MUST | Comments are **optional**. An absent *or empty* `comments` array **MUST** render no comment block at all — no header, no spacing. *`View/CommentBlockView.swift` owns the rule: it emits nothing unless `comments` is non-nil and non-empty, so neither stack spacing nor the background fill survives an empty array.* |
 | `FR-TWEET-007` | MUST | Each comment row **MUST** show the commenter's nick followed by the comment text, visually distinguished (the nick tinted, per the reference screenshots `[I]`). The comment block sits on its own background fill (`Extension/Color.swift`). *One interpolated `Text` per row, so nick and comment wrap as a single paragraph; the fill is applied once, behind the block, rather than per `Text`.* |
 | `FR-TWEET-008` | SHOULD | A tweet cell **SHOULD** be visually separated from the next by a hairline rule. `View/FooterView.swift` exists for this purpose and **SHOULD** be used in place of the ad-hoc `Divider()` currently in `MomentView`. *Met — `FooterView` sits inside each tweet's list row. As a sibling row of its own it would have taken the `List`'s minimum row height, reserving empty space under every cell; the `Divider()` it replaced had the same defect.* |
 
-**A structural note on `TweetView`'s image helpers — resolved in commit 03, recorded here as history.** `avatar(_from:)` and `fetchImage(_from:)` both called the *asynchronous* closure overload of `ImageHelper.getImage` and then immediately `return`ed a local variable the callback had not yet written, so they could only ever return the placeholder / `nil`. Separately, `addImagesToView(_from:)` ended in `.padding() as? AnyView`, a cast that always yielded `nil` because `padding()` returns a `ModifiedContent`, not an `AnyView` — so the grid never drew anything at all. All three were deleted rather than patched (`arch-spec §8`). The avatar slot is now a `RemoteImage` fed `tweet.sender.avatar`; only `FR-TWEET-004`'s ⛔ remains, because the grid has yet to be written.
+**A structural note on `TweetView`'s image helpers — resolved in commit 03, recorded here as history.** `avatar(_from:)` and `fetchImage(_from:)` both called the *asynchronous* closure overload of `ImageHelper.getImage` and then immediately `return`ed a local variable the callback had not yet written, so they could only ever return the placeholder / `nil`. Separately, `addImagesToView(_from:)` ended in `.padding() as? AnyView`, a cast that always yielded `nil` because `padding()` returns a `ModifiedContent`, not an `AnyView` — so the grid never drew anything at all. All three were deleted rather than patched (`arch-spec §8`). The avatar slot is now a `RemoteImage` fed `tweet.sender.avatar`; the grid was rewritten from scratch in commit 05 as `View/ImageGridView.swift` over the pure `ImageGridLayout`, and `TweetView` reaches it through one unconditional child.
 
 ### 4.5 Data filtering (`FR-DATA`)
 
@@ -181,17 +181,17 @@ Derived from the reference screenshots `[I]`; the brief states only the 0–9 ra
 | Image count | Columns | Cell sizing |
 |-------------|---------|-------------|
 | 0 | — | No grid rendered. |
-| 1 | 1 | Single image, larger than a grid cell, aspect-ratio preserved `[A]`. |
+| 1 | 1 | Single image, larger than a grid cell — two of the three columns wide. Square and aspect-filled, **not** ratio-preserving; §8 Q3 records why. |
 | 2–3 | 3 | One row, cells left-aligned; the row is **not** stretched to fill the width. |
-| 4 | 2 | 2×2 block `[A]` — the classic WeChat special case. |
+| 4 | 2 | 2×2 block — the classic WeChat special case. Cells stay one third of the width, so the block is two columns wide, not half the row each. |
 | 5–6 | 3 | Two rows, last row partially filled and left-aligned. |
 | 7–9 | 3 | Three rows. 9 images fills a complete 3×3. |
 
 | ID | Level | Requirement |
 |----|-------|-------------|
-| `FR-TWEET-009` | MUST | Grid cells **MUST** be square and uniformly sized within a tweet, and images **MUST** fill them without distortion (aspect-fill + clip). |
-| `FR-TWEET-010` | MUST | The grid **MUST NOT** use a hard-coded pixel width for the row; cell size derives from the available width so the layout survives `NFR-LAYOUT-001`. |
-| `FR-TWEET-011` | SHOULD | The 1-image and 4-image special cases **SHOULD** be implemented as described. Both are tagged `[A]` — see §8 Q3. |
+| `FR-TWEET-009` | MUST | Grid cells **MUST** be square and uniformly sized within a tweet, and images **MUST** fill them without distortion (aspect-fill + clip). *Each cell is a flexible 1:1 box with the image aspect-filled and clipped inside it; `RemoteImage` never applies a frame of its own (`arch-spec §8.4`).* |
+| `FR-TWEET-010` | MUST | The grid **MUST NOT** use a hard-coded pixel width for the row; cell size derives from the available width so the layout survives `NFR-LAYOUT-001`. *Every layout is drawn inside one three-column `Grid`, so no code computes a width — a cell is a third of whatever the device and orientation offer. `Constants.IMAGE_SIZE` survives only as the loader's downsampling hint, never as a frame.* |
+| `FR-TWEET-011` | SHOULD | The 1-image and 4-image special cases **SHOULD** be implemented as described. Both were tagged `[A]`; **resolved 2026-07-28** — see §8 Q3 for what was decided and what it cost. |
 
 ---
 
@@ -230,7 +230,7 @@ Referenceable as `fn-spec §8 Q<n>`.
 
 1. **Scroll trigger point.** Does "pulling up the view at the bottom" mean the last cell becoming visible, or the user over-scrolling past the end? The former is the conventional infinite-scroll reading and is assumed `[A]`; it changes the feel materially.
 2. **Refresh semantics.** ⚠️ Does pull-to-refresh re-request `/tweets`, or only reset the displayed window over the already-cached list? The brief says both "all tweets are fetched... at the first time" and "only first 5 items are shown after refreshing" — compatible with either. See `FR-PAGE-006`.
-3. **Grid special cases.** ⚠️ Are the 1-image and 4-image layouts (§5) actually special-cased, or does every count use a uniform 3-column grid? The reference screenshots do not contain a 1- or 4-image tweet.
+3. ~~**Grid special cases.**~~ **Resolved 2026-07-28.** Were the 1-image and 4-image layouts (§5) actually special-cased, or did every count use a uniform 3-column grid? The reference screenshots contain neither a 1- nor a 4-image tweet, so this could not be settled by looking. **Decided in favour of §5 as written** — both special cases are implemented. The 1-image case carried the decision: six of the nine image-bearing tweets in the served feed have exactly one image, so a uniform grid would have rendered the most common image tweet as a lone thumbnail. **Second decision, same question:** §5's *"aspect-ratio preserved"* for that single image was **not** taken up. `RemoteImage` does not expose the loaded image's intrinsic size, and widening it would mean per-cell state and a row that resizes when the image lands; `FR-TWEET-009`'s square-and-aspect-fill won instead, at ~2/3 of the content width. **Assumptions carried:** the 2×2 block uses grid-cell-sized cells rather than half-width ones, and a single image may be cropped where a ratio-preserving layout would have shown it whole. Both would be revisited if a reference screenshot of either case ever appears.
 4. **Page-append indicator.** Is a spinner shown while the next 5 are appended? Since the data is already in memory the append is instantaneous, so probably not `[A]` — but this changes if Q2 resolves toward re-fetching.
 5. **Malformed-element accounting.** `FR-DATA-003` drops them silently. Should the count of dropped elements be logged for diagnostics?
 6. **Fewer than 5 displayable tweets.** Not reachable with the current fixture (15 available), but the behaviour should be defined for robustness: render what exists, no padding, no empty-state message.

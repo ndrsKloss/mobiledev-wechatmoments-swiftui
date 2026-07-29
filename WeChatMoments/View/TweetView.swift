@@ -43,10 +43,9 @@ struct TweetView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                // TODO: FR-TWEET-004/005 — the 0-to-9 image grid, next commit. The helper that
-                // stood here (`addImagesToView(_from:)`) rendered a fixed 0..<5 range and ended
-                // in `.padding() as? AnyView`, a cast that always evaluated to nil, so it never
-                // drew anything. fn-spec §4.4: rewrite, do not patch.
+                // FR-TWEET-004/005: 0 to 9 images, laid out per fn-spec §5. Absent or empty
+                // renders nothing at all — the grid owns that rule, as the comment block does.
+                ImageGridView(images: tweet.images)
 
                 // FR-TWEET-006: absent or empty comments render nothing at all.
                 CommentBlockView(comments: tweet.comments)
@@ -78,6 +77,18 @@ struct TweetView: View {
 
 #Preview("Empty comments") {
     TweetView(tweet: .previewEmptyComments)
+        .environment(\.imageLoader, MockImageLoader())
+}
+
+// The two fn-spec §5 rows tagged [A]. Both sit below the fold in the running feed — one 4-image
+// tweet and one 9-image tweet out of fifteen — so this is where they get looked at.
+#Preview("Four images") {
+    TweetView(tweet: .previewImages(4))
+        .environment(\.imageLoader, MockImageLoader())
+}
+
+#Preview("Nine images") {
+    TweetView(tweet: .previewImages(9))
         .environment(\.imageLoader, MockImageLoader())
 }
 
@@ -119,6 +130,15 @@ private extension Tweet {
             )
         ]
     )
+
+    static func previewImages(_ count: Int) -> Tweet {
+        Tweet(
+            sender: previewSender,
+            content: "\(count) images.",
+            images: (0..<count).map { Img(url: "https://example.invalid/\($0).jpeg") },
+            comments: nil
+        )
+    }
 
     static let previewEmptyComments = Tweet(
         sender: previewSender,
