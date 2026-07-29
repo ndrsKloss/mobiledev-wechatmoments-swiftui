@@ -29,6 +29,14 @@ struct MomentView: View {
         return momentsViewModel.user
     }
 
+    /// FR-PAGE-002/005: the view decides *when* to page, the view model decides *what* that means.
+    /// Deliberately unguarded beyond the identity check — `loadNextPage()` clamps, so the cost of
+    /// this firing again on a row that is scrolled back into view is an assignment (`FR-PAGE-003`).
+    private func appendPageIfLast(_ tweet: Tweet) {
+        guard tweet.id == tweets.last?.id else { return }
+        momentsViewModel.loadNextPage()
+    }
+
     var body: some View {
         List {
             Group {
@@ -50,6 +58,9 @@ struct MomentView: View {
                         TweetView(tweet: tweet)
                         FooterView()   // FR-TWEET-008
                     }
+                    // FR-PAGE-002: List is lazy, so a row's .onAppear is the moment it scrolls
+                    // into view. fn-spec §8 Q1 resolved to the last cell merely becoming visible.
+                    .onAppear { appendPageIfLast(tweet) }
                 }
                 .listRowSeparator(.hidden)
             }

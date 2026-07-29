@@ -300,7 +300,7 @@ The displayed window is a **derived value**, not a second stored array: `Array(a
 | Intent | Effect |
 |--------|--------|
 | `loadInitialData()` | Fetch, filter, store the full feed; set displayed count to 5. *Built in commit 06. Guarded on the `.idle` state so a repeated `.onAppear` cannot re-request (`FR-FEED-002`).* |
-| `loadNextPage()` | `displayedCount = min(displayedCount + 5, allTweets.count)`. Idempotent at the end of the list (`FR-PAGE-003`); no network. *Not yet built — `FR-PAGE-002`.* |
+| `loadNextPage()` | `displayedCount = min(displayedCount + 5, allTweets.count)`. Idempotent at the end of the list (`FR-PAGE-003`); no network. *Built in commit 07, exactly as written here. The `min` is load-bearing rather than defensive: it is what allows the view trigger to fire repeatedly without a guard of its own.* |
 | `refresh()` | Reset displayed count to 5. Whether it also re-fetches is `fn-spec §8 Q2`. *Not yet built — `FR-PAGE-004`.* |
 
 The page size (5) is a named constant in `Config/Constants.swift`, not a literal scattered across the view model. *`Constants.PAGE_SIZE`, added in commit 06; it keeps the file's existing `SCREAMING_SNAKE` convention rather than pre-empting the §9 rename.*
@@ -308,6 +308,8 @@ The page size (5) is a named constant in `Config/Constants.swift`, not a literal
 ### 7.4 Trigger
 
 The view detects "scrolled to the bottom" and calls `loadNextPage()`. The detection mechanism — `onAppear` on the last row, a scroll-position reader, or `List`'s own lazy loading — is a view concern and is not specified here. The exact trigger point is `fn-spec §8 Q1`.
+
+*Chosen in commit 07, once `§8 Q1` was resolved: `List`'s own laziness plus an `.onAppear` on the last displayed row, dispatched through a named `appendPageIfLast(_:)` rather than inline in `body`. The view still performs no paging arithmetic — it decides* when*, the view model decides* what *(`FR-PAGE-005`). The scroll-geometry alternatives were not weighed on merit: `.onScrollGeometryChange` and `scrollPosition(_:)` are iOS 18+ and this project targets iOS 17.2, so measuring the offset by hand in a `GeometryReader` was the only form they could have taken.*
 
 ---
 

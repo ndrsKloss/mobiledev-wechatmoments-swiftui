@@ -67,6 +67,16 @@ final class MomentsViewModel: ObservableObject {
         loadUserProfile()
     }
 
+    /// `arch-spec §7.3`, FR-PAGE-002: grow the window by one page over the feed already in memory.
+    ///
+    /// FR-PAGE-003 lives in the `min`. At the end of the list this assigns the value the property
+    /// already holds, so a trigger that fires more than once is a no-op rather than an overrun —
+    /// which is what lets the view trigger stay a single unguarded comparison. No network
+    /// (`NFR-PERF-008`): holding the whole feed in commit 06 is what buys that.
+    func loadNextPage() {
+        displayedCount = min(displayedCount + Constants.PAGE_SIZE, allTweets.count)
+    }
+
     private func loadTweets() {
         tweetService.getTweets(Constants.USER_NAME)
             .receive(on: RunLoop.main)   // NFR-PERF-004

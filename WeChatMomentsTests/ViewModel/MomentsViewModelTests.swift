@@ -66,6 +66,69 @@ final class MomentsViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.displayedTweets.count, 2)
     }
 
+    // MARK: - Appending (FR-PAGE-002/003)
+
+    /// FR-PAGE-002: one page at a time, over the feed already in memory. The stored feed is
+    /// untouched by the append — that is `FR-FEED-002`, the reason no request is involved.
+    func test_appending_grows_the_window_by_one_page() {
+        let viewModel = makeViewModel()
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        viewModel.loadNextPage()
+
+        XCTAssertEqual(viewModel.displayedCount, 10)
+        XCTAssertEqual(viewModel.displayedTweets.count, 10)
+        XCTAssertEqual(viewModel.allTweets.count, 15, "Appending must not re-fetch or re-filter.")
+    }
+
+    /// `nfr §4.5`'s acceptance sequence, minus the refresh leg that commit 08 owns: 5 → 10 → 15.
+    /// The window stays a prefix in order at every step (`arch-spec §7.1`).
+    func test_appending_twice_reaches_the_last_page() {
+        let viewModel = makeViewModel()
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        XCTAssertEqual(viewModel.displayedCount, 5)
+
+        viewModel.loadNextPage()
+        XCTAssertEqual(viewModel.displayedCount, 10)
+
+        viewModel.loadNextPage()
+        XCTAssertEqual(viewModel.displayedCount, 15)
+        XCTAssertEqual(viewModel.displayedTweets.map(\.id), viewModel.allTweets.map(\.id))
+    }
+
+    /// FR-PAGE-003: reaching the end must not overrun or error. The trigger is an `.onAppear` on
+    /// the last row, which fires again whenever that row is scrolled back into view, so this is
+    /// the real production path rather than a defensive extra.
+    func test_appending_at_the_end_is_idempotent() {
+        let viewModel = makeViewModel()
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        viewModel.loadNextPage()
+        viewModel.loadNextPage()
+        XCTAssertEqual(viewModel.displayedCount, 15)
+
+        viewModel.loadNextPage()
+        viewModel.loadNextPage()
+
+        XCTAssertEqual(viewModel.displayedCount, 15, "The window must not grow past the feed.")
+        XCTAssertEqual(viewModel.displayedTweets.count, viewModel.allTweets.count)
+    }
+
+    /// The window can never promise rows the feed does not have. With nothing loaded `allTweets`
+    /// is empty, so the `min` pins the count at 0 rather than at a page size.
+    func test_appending_before_the_feed_lands_does_nothing() {
+        let viewModel = makeViewModel()
+
+        viewModel.loadNextPage()
+
+        XCTAssertEqual(viewModel.displayedCount, 0)
+        XCTAssertTrue(viewModel.displayedTweets.isEmpty)
+    }
+
     // MARK: - Loading (FR-FEED-003)
 
     /// The defect this commit exists to fix: the flag must follow real in-flight work. The code it
