@@ -79,7 +79,8 @@ WeChatMoments/
 │   ├── CommentBlockView.swift  # hides itself when comments are absent or empty (FR-TWEET-006)
 │   ├── CommentRowView.swift    # one comment line
 │   ├── FeedErrorView.swift     # the feed's error state (FR-FEED-004, FAD-DATA-c)
-│   └── FooterView.swift        # the hairline between cells (FR-TWEET-008)
+│   ├── FooterView.swift        # the hairline between cells (FR-TWEET-008)
+│   └── PagingFooterView.swift  # the has-more affordance under the last row (FR-PAGE-007)
 ├── ViewModel/
 │   ├── MomentsViewModel.swift
 │   ├── Loadable.swift          # one request's lifecycle as a value (§4.2)
@@ -289,6 +290,8 @@ The view model holds two things:
 The displayed window is a **derived value**, not a second stored array: `Array(allTweets.prefix(displayedCount))`. Storing it separately introduces a synchronisation bug for no benefit.
 
 *Both landed in commit 06, as `feed: Loadable<[Tweet]>` and `@Published private(set) var displayedCount`, with `displayedTweets` the derived prefix. `prefix` clamps on its own, so a feed shorter than a page needs no special case (`fn-spec §8 Q6`).*
+
+*`hasMorePages` (`FR-PAGE-007`, commit 09) is the second derived value over the same two numbers, and it is derived for the same reason the window is: a stored `showPagingFooter` flag would be a third thing to keep in step with a count that four separate paths already move. It is not part of `Loadable` and does not touch `showIndicator` — nothing is in flight when it is true.*
 
 ### 7.2 Why the view model and not the view
 

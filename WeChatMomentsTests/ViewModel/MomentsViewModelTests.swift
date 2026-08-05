@@ -129,6 +129,70 @@ final class MomentsViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.displayedTweets.isEmpty)
     }
 
+    // MARK: - The has-more affordance (FR-PAGE-007)
+
+    /// The property the paging footer is bound to, across the whole append sequence. What matters
+    /// is the last step: it must go false on the final page, or the footer spins forever at the
+    /// end of a feed that has nothing more to give.
+    func test_more_pages_is_true_until_the_last_page_lands() {
+        let viewModel = makeViewModel()
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        XCTAssertTrue(viewModel.hasMorePages, "5 of 15 shown.")
+
+        viewModel.loadNextPage()
+        XCTAssertTrue(viewModel.hasMorePages, "10 of 15 shown.")
+
+        viewModel.loadNextPage()
+        XCTAssertFalse(viewModel.hasMorePages, "15 of 15 — the footer must disappear.")
+    }
+
+    /// Before anything lands, and after a feed that failed, the window and the feed are both
+    /// empty — so the footer must not appear over a screen that is showing an error
+    /// (`FR-FEED-004`). `0 < 0` is false, which is the whole implementation.
+    func test_more_pages_is_false_with_no_feed() {
+        let viewModel = makeViewModel(feed: MockBaseService(result: .failure(.invalidResponse)))
+        XCTAssertFalse(viewModel.hasMorePages, "Nothing requested yet.")
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+
+        XCTAssertFalse(viewModel.hasMorePages, "A failed feed has no more pages, it has no pages.")
+    }
+
+    /// `fn-spec §8 Q6`: a feed that fits in one page is already complete on arrival, so the
+    /// footer never appears at all. Not reachable with the served fixture.
+    func test_more_pages_is_false_when_the_feed_fits_in_one_page() {
+        let twoTweets = """
+        [{"content": "one", "sender": {"nick": "A"}}, {"content": "two", "sender": {"nick": "B"}}]
+        """
+        let viewModel = makeViewModel(feed: .init(json: twoTweets))
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+
+        XCTAssertEqual(viewModel.displayedCount, 2)
+        XCTAssertFalse(viewModel.hasMorePages)
+    }
+
+    /// FR-PAGE-004 resets the window to one page, so the affordance has to come back with it —
+    /// a user who paged to the end and then refreshed can page again, and must be told so.
+    func test_refresh_restores_more_pages() async {
+        let viewModel = makeViewModel()
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        viewModel.loadNextPage()
+        viewModel.loadNextPage()
+        XCTAssertFalse(viewModel.hasMorePages)
+
+        await viewModel.refresh()
+
+        XCTAssertEqual(viewModel.displayedCount, 5)
+        XCTAssertTrue(viewModel.hasMorePages)
+    }
+
     // MARK: - Refreshing (FR-PAGE-004/006)
 
     /// The requirement itself, and `nfr §4.5`'s acceptance sequence completed: 5 → 10 → 15 → 5.

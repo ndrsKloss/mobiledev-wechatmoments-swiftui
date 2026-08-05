@@ -44,6 +44,14 @@ final class MomentsViewModel: ObservableObject {
     /// a feed shorter than a page renders what exists with no padding (`fn-spec §8 Q6`).
     var displayedTweets: [Tweet] { Array(allTweets.prefix(displayedCount)) }
 
+    /// FR-PAGE-007: whether the window still has feed behind it. Derived from the same two numbers
+    /// the window itself is, so it cannot disagree with what is on screen.
+    ///
+    /// It is deliberately *not* a loading flag. The append is synchronous (`NFR-PERF-008`), so
+    /// there is no in-flight period to report; this says "there is more below", and the footer it
+    /// drives borrows the vocabulary of a paging spinner to say so.
+    var hasMorePages: Bool { displayedCount < allTweets.count }
+
     /// FR-FEED-003: true exactly while a request is in flight. The flag it replaces was toggled
     /// twice before either request had started and once more per completion, so it tracked nothing.
     var showIndicator: Bool { feed.isLoading || profile.isLoading }

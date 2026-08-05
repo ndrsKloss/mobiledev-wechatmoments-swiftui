@@ -28,4 +28,5 @@ enum Constants {
     static let COMMENT_ROW_SPACING: CGFloat = 2
     static let COMMENT_BLOCK_PADDING: CGFloat = 6
     static let SEPARATOR_HEIGHT: CGFloat = 0.5
+    static let PAGING_FOOTER_PADDING: CGFloat = 16
 }

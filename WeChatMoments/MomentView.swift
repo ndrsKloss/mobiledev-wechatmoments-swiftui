@@ -63,6 +63,14 @@ struct MomentView: View {
                     .onAppear { appendPageIfLast(tweet) }
                 }
                 .listRowSeparator(.hidden)
+                // FR-PAGE-007: a row, not an overlay, so it occupies real space at the end of the
+                // list and the next page pushes it down instead of drawing over the feed. No
+                // .onAppear of its own — the append trigger stays on the last tweet row (§8 Q1
+                // declined a sentinel, and this row must not quietly become one).
+                if momentsViewModel.hasMorePages {
+                    PagingFooterView()
+                        .listRowSeparator(.hidden)
+                }
             }
             .listRowInsets(EdgeInsets())
         }
