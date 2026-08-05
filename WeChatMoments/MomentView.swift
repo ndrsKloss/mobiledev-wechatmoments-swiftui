@@ -72,11 +72,26 @@ struct MomentView: View {
                 indicatorView
             }
         })
+        // FR-PAGE-004: the gesture is the system's, the transition is the view model's. No
+        // app-level indicator is needed — .refreshable holds its own spinner until this
+        // returns (fn-spec §8 Q4).
+        .refreshable {
+            await momentsViewModel.refresh()
+        }
         .onAppear {
             // Idempotent by design — .onAppear fires again on every rebuild of this row and on
             // return from the background (FR-FEED-002).
             momentsViewModel.loadInitialData()
-        }.ignoresSafeArea()
+        }
+        // NFR-LAYOUT-006: the bottom edge still bleeds, but the top is left to the safe area so
+        // the .refreshable spinner draws below the status bar where it can be seen. A blanket
+        // .ignoresSafeArea() put it under the clock.
+        // NFR-LAYOUT-006: the top edge is left to the safe area so the .refreshable spinner draws
+        // below the status bar instead of inside it. Verified both ways under a held pull — with
+        // a blanket .ignoresSafeArea() the spinner lands beside the clock. The cost is that the
+        // banner no longer bleeds under the status bar, which FR-HEADER-001's reference
+        // screenshot does show; see the summary for the alternative.
+        .ignoresSafeArea(edges: .bottom)
     }
 }
 

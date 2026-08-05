@@ -213,7 +213,7 @@ Ratified **2026-07-27**.
 
 **Why not a composite of sender + content + index.** Index is positional. The displayed window moves under pagination (`FR-PAGE-002`) and resets on refresh (`FR-PAGE-004`), so a positional component would change identity for rows that did not change, which is precisely the diffing bug the requirement exists to prevent.
 
-**Assumption carried:** identity is per-decode, not per-tweet-in-the-world. Re-fetching the feed mints new ids. That is correct for `FR-PAGE-004` as currently read (refresh resets the window without re-fetching, `fn-spec §8 Q2`) and would need revisiting only if refresh becomes a re-fetch.
+~~**Assumption carried:** identity is per-decode, not per-tweet-in-the-world. Re-fetching the feed mints new ids. That is correct for `FR-PAGE-004` as currently read (refresh resets the window without re-fetching, `fn-spec §8 Q2`) and would need revisiting only if refresh becomes a re-fetch.~~ **Restruck 2026-07-29:** `fn-spec §8 Q2` resolved *toward* re-fetching, so this is now the live case. Identity is still per-decode and a refresh does mint new ids for every row — SwiftUI therefore tears down and rebuilds all of them, firing `.onAppear` again. The window does not grow back, but the reason is not the `min` clamp in `loadNextPage()`, which does not help here: it is that `.refreshable` only fires at the top of the scroll view, so the geometry after a reset matches the geometry on first load, where row 5 sits below the fold. **That is a layout argument, and it is the assumption now carried in place of this one** — `NFR-LAYOUT-002`'s fixed-370 header is exactly the kind of thing that could invalidate it. Verified on device: 15 → refresh → 5, still 5 four seconds later.
 
 **Verified:** `TweetDecodingTests.test_identity_is_unique_across_identical_content`.
 
@@ -266,6 +266,12 @@ its own commit; adding a second, differently-shaped recovery affordance first wo
 all** — a user who launches with the backend down must kill and relaunch the app. That is a real gap
 in the interim, accepted because the alternative is an affordance the brief does not ask for and that
 `FR-PAGE-004` will duplicate.
+
+**Closed 2026-07-29 by commit 08, and it decided more than its own scope.** `FR-PAGE-004` landed as
+pull-to-refresh, so the recovery path this section conceded was missing now exists, by the affordance
+named here. The concession is also what settled `fn-spec §8 Q2`: a reset-the-window-only refresh
+would have recovered nothing over a `.failed` feed, converting this interim gap into a permanent one,
+so refresh re-fetches. The no-retry-button decision stands unchanged — the gesture *is* the retry.
 
 **Assumption carried:** `NetworkError.errorDescription` is fit to show a user. It is developer-facing
 English and it is not localized — which is consistent with `README.md §5` placing localization out of
@@ -349,7 +355,7 @@ The brief states *"Unit tests are appreciated"* and *"Functional programming is 
 | `NFR-TEST-002` | MUST | Unit tests **MUST NOT** require a live network or a running mountebank instance. *The full suite passes with mountebank stopped; the three genuine integration tests skip (§4.8).* |
 | `NFR-TEST-003` | MUST | The committed fixture `WeChatMomentsTests/Resources/Tweets.json` **MUST** be the offline source for decoding tests. |
 | `NFR-TEST-004` | MUST | Tests that genuinely require mountebank **MUST** be identifiable as integration tests — by naming, by target, or by a documented `-only-testing` selector — so that the offline suite can be run alone. |
-| `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). *`MomentsViewModelTests` drives the initial window, the loading flag, both failure paths and — since commit 07 — the append transitions through `MockBaseService` with no view. §4.5's sequence is now assertable as far as 5 → 10 → 15, including that further appends at the end neither grow the window nor trap; only the refresh leg waits on `FR-PAGE-004`.* |
+| `NFR-TEST-005` | MUST | Pagination logic (`FR-PAGE-*`) **MUST** be testable without instantiating a view. This follows from it living in the view model (`arch-spec §7`). *`MomentsViewModelTests` drives the initial window, the loading flag, both failure paths and — since commit 07 — the append transitions through `MockBaseService` with no view. §4.5's sequence is assertable end to end since commit 08 — 5 → 10 → 15 → 5 — including that further appends at the end neither grow the window nor trap, that a refresh re-requests both endpoints and picks up changed data, and that it recovers a failed feed. The whole `FR-PAGE-*` surface is now covered with no view instantiated.* |
 | `NFR-TEST-006` | SHOULD | Data transforms — filtering (`FR-DATA-*`), paging windows, grid-column derivation — **SHOULD** be pure functions over their inputs, so they can be tested without any object graph. This is the concrete form the brief's "functional programming is appreciated" takes. *`TweetFilter` is the first of these — a `static` pure transform over `[Tweet]` that the view model calls but does not own, tested by `TweetFilterTests` with no view model instantiated. `ImageGridLayout` is the second: `fn-spec §5` as a function of the image count, and the only way the table's rows for 2 and 5–8 images are covered at all, since the served feed never carries those counts.* |
 | `NFR-TEST-007` | SHOULD | Mocks **SHOULD** live in a single `Mocks/` folder, guarded by `#if DEBUG`, and be shared between SwiftUI previews and tests. |
 | `NFR-TEST-008` | SHOULD | The scenarios in `fn-spec §7` **SHOULD** each have a corresponding automated test where the scenario is observable without a device. |
@@ -412,7 +418,7 @@ Every row must pass before the app is considered complete.
 | 2 | Small iPhone | Landscape | mountebank up | Reflow, no clipping, 3×3 grid intact |
 | 3 | Large iPhone | Portrait | mountebank up | Full pagination cycle 5 → 10 → 15 → refresh → 5 |
 | 4 | Large iPhone | Landscape | mountebank up | As row 2 |
-| 5 | Any | Portrait | mountebank **down** | Visible error state; no hang; no crash |
+| 5 | Any | Portrait | mountebank **down**, then started | Visible error state; no hang; no crash; **pull to refresh recovers the feed and the header** (`FR-PAGE-004`) |
 | 6 | Any | Portrait | mountebank up, image host unreachable | Placeholders in every image slot; text and layout unaffected |
 | 7 | Any | Rotate mid-scroll | mountebank up | Layout survives; scroll position approximately preserved |
 

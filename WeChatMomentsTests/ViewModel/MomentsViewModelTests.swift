@@ -129,6 +129,103 @@ final class MomentsViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.displayedTweets.isEmpty)
     }
 
+    // MARK: - Refreshing (FR-PAGE-004/006)
+
+    /// The requirement itself, and `nfr §4.5`'s acceptance sequence completed: 5 → 10 → 15 → 5.
+    func test_refresh_resets_the_window_to_the_first_page() async {
+        let viewModel = makeViewModel()
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        viewModel.loadNextPage()
+        viewModel.loadNextPage()
+        XCTAssertEqual(viewModel.displayedCount, 15)
+
+        await viewModel.refresh()
+
+        XCTAssertEqual(viewModel.displayedCount, 5)
+        XCTAssertEqual(viewModel.displayedTweets.count, 5)
+        XCTAssertEqual(viewModel.allTweets.count, 15, "The whole feed is still held (FR-FEED-001).")
+    }
+
+    /// FR-PAGE-006 resolved toward re-fetching, and both endpoints rather than the feed alone:
+    /// either request can be the one that failed (`FR-FEED-005`), so a feed-only refresh would
+    /// leave a user who launched offline with a permanently broken header.
+    func test_refresh_re_requests_both_endpoints() async {
+        let feed = MockBaseService(result: .success(feedFixture))
+        let profile = MockBaseService(json: Self.profileJson)
+        let viewModel = makeViewModel(feed: feed, profile: profile)
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        XCTAssertEqual(feed.callCount, 1)
+
+        await viewModel.refresh()
+
+        XCTAssertEqual(feed.callCount, 2)
+        XCTAssertEqual(profile.callCount, 2)
+    }
+
+    /// Re-fetching means the new payload wins. The window follows it down to 2 rather than
+    /// padding to a page — `fn-spec §8 Q6` on the refresh path, free, because `apply(feed:)` is
+    /// the same assignment the initial load makes.
+    func test_refresh_picks_up_changed_data() async {
+        let feed = MockBaseService(result: .success(feedFixture))
+        let viewModel = makeViewModel(feed: feed)
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        XCTAssertEqual(viewModel.allTweets.count, 15)
+
+        feed.result = .success(Data("""
+        [{"content": "one", "sender": {"nick": "A"}}, {"content": "two", "sender": {"nick": "B"}}]
+        """.utf8))
+        await viewModel.refresh()
+
+        XCTAssertEqual(viewModel.allTweets.count, 2)
+        XCTAssertEqual(viewModel.displayedCount, 2, "No padding to a full page.")
+        XCTAssertEqual(viewModel.displayedTweets.first?.content, "one")
+    }
+
+    /// The headline behaviour: launch with the backend down, start it, pull to refresh. This is
+    /// the recovery path `nfr §2.13` conceded was missing until `FR-PAGE-004` landed, which is
+    /// what decided `fn-spec §8 Q2` — a reset-only refresh recovers nothing here.
+    func test_refresh_recovers_a_failed_feed() async throws {
+        let feed = MockBaseService(result: .failure(.transport(URLError(.notConnectedToInternet))))
+        let viewModel = makeViewModel(feed: feed)
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        XCTAssertNotNil(viewModel.feedError)
+        XCTAssertEqual(viewModel.displayedCount, 0)
+
+        feed.result = .success(feedFixture)
+        await viewModel.refresh()
+
+        XCTAssertNil(viewModel.feedError, "A successful refresh clears the error state.")
+        XCTAssertEqual(viewModel.displayedCount, 5)
+        XCTAssertEqual(viewModel.allTweets.count, 15)
+    }
+
+    /// FR-FEED-002 survives the refresh. `refresh()` takes a second entry path rather than
+    /// relaxing `loadInitialData()`'s `.idle` guard, so the guard still holds afterwards: the
+    /// states are `.loaded` or `.failed`, never back to `.idle`.
+    func test_a_load_after_a_refresh_still_does_not_request_again() async {
+        let feed = MockBaseService(result: .success(feedFixture))
+        let profile = MockBaseService(json: Self.profileJson)
+        let viewModel = makeViewModel(feed: feed, profile: profile)
+
+        viewModel.loadInitialData()
+        awaitPublished(viewModel.$feed) { !$0.isLoading }
+        await viewModel.refresh()
+        XCTAssertEqual(feed.callCount, 2)
+
+        viewModel.loadInitialData()
+
+        XCTAssertEqual(feed.callCount, 2, "The .idle guard still holds after a refresh.")
+        XCTAssertEqual(profile.callCount, 2)
+    }
+
     // MARK: - Loading (FR-FEED-003)
 
     /// The defect this commit exists to fix: the flag must follow real in-flight work. The code it

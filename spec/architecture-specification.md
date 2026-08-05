@@ -301,7 +301,7 @@ The displayed window is a **derived value**, not a second stored array: `Array(a
 |--------|--------|
 | `loadInitialData()` | Fetch, filter, store the full feed; set displayed count to 5. *Built in commit 06. Guarded on the `.idle` state so a repeated `.onAppear` cannot re-request (`FR-FEED-002`).* |
 | `loadNextPage()` | `displayedCount = min(displayedCount + 5, allTweets.count)`. Idempotent at the end of the list (`FR-PAGE-003`); no network. *Built in commit 07, exactly as written here. The `min` is load-bearing rather than defensive: it is what allows the view trigger to fire repeatedly without a guard of its own.* |
-| `refresh()` | Reset displayed count to 5. Whether it also re-fetches is `fn-spec §8 Q2`. *Not yet built — `FR-PAGE-004`.* |
+| `refresh()` | Re-request both endpoints, then reset displayed count to 5. `fn-spec §8 Q2` resolved toward re-fetching (`FR-PAGE-006`). *Built in commit 08 as `@MainActor func refresh() async`, so `.refreshable` can await it. It does not reuse `loadInitialData()` — that method's `.idle` guard **is** `FR-FEED-002`, and relaxing it to share one entry point would have cost the requirement the guard enforces. The window assignment is shared instead, in a private `apply(feed:)` both paths call. The Combine → async seam is a private `static` bridge over `publisher.values`, not a protocol (§6).* |
 
 The page size (5) is a named constant in `Config/Constants.swift`, not a literal scattered across the view model. *`Constants.PAGE_SIZE`, added in commit 06; it keeps the file's existing `SCREAMING_SNAKE` convention rather than pre-empting the §9 rename.*
 
@@ -392,7 +392,7 @@ SwiftUI's own `AsyncImage` was the obvious alternative and is rejected: it offer
 
 | Suite | Requires | Contents |
 |-------|----------|----------|
-| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; `HttpService` status validation against `Support/StubURLProtocol.swift`; `TweetService` / `UserService` against `MockBaseService`; `ImageLoader`'s cache, coalescing, downsampling and failure paths against the same `StubURLProtocol`; filtering rules; and `MomentsViewModel`'s initial window, loading flag and failure paths against `MockBaseService`, with the append and refresh transitions to follow those intents. |
+| **Unit** | Nothing. Must pass with the network off (`NFR-TEST-002`). | Model decoding against `Tweets.json`; `HttpService` status validation against `Support/StubURLProtocol.swift`; `TweetService` / `UserService` against `MockBaseService`; `ImageLoader`'s cache, coalescing, downsampling and failure paths against the same `StubURLProtocol`; filtering rules; and `MomentsViewModel`'s initial window, loading flag, failure paths, append transitions and — since commit 08 — refresh transitions, all against `MockBaseService`. |
 | **Integration** | mountebank on `localhost:2727`. | `WeChatMomentsTests/Integration/HttpServiceIntegrationTests.swift` — the endpoints answer, the served feed is still 22 elements, and the catch-all really does return 404. |
 
 *The split is expressed by folder and by class name, with each integration test opening `try XCTSkipUnless(Mountebank.isReachable)` — `FAD-TEST-a`, resolved in `nfr §4.8`. With mountebank stopped the whole suite passes and those tests report as skipped; no `-only-testing` selector is required to get a green offline run, though `-only-testing:WeChatMomentsTests/HttpServiceIntegrationTests` selects them when the mock is up.*
